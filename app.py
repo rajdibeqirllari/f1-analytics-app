@@ -165,7 +165,7 @@ def get_session_from_inputs(
     test_number: int | None,
     day_number: int | None,
 ):
-    if mode == "Race Weekend":
+if mode == "Race Weekend":
     return load_session(int(year), event_name, session_name)
 else:
     session = fastf1.get_testing_session(int(year), int(test_number), int(day_number))
