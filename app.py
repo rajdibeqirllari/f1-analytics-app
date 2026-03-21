@@ -13,6 +13,13 @@ from matplotlib.lines import Line2D
 import matplotlib.colors as mcolors
 
 
+# 👇 ADD IT RIGHT HERE
+@st.cache_data
+def load_session(year, event, session_type):
+    session = fastf1.get_session(year, event, session_type)
+    session.load(laps=True, telemetry=True, weather=False, messages=False)
+    return session
+
 # -----------------------------------------------------------------------------
 # FastF1 / matplotlib style
 # -----------------------------------------------------------------------------
@@ -159,10 +166,9 @@ def get_session_from_inputs(
     day_number: int | None,
 ):
     if mode == "Race Weekend":
-        session = fastf1.get_session(int(year), event_name, session_name)
-    else:
-        session = fastf1.get_testing_session(int(year), int(test_number), int(day_number))
-
+    return load_session(int(year), event_name, session_name)
+else:
+    session = fastf1.get_testing_session(int(year), int(test_number), int(day_number))
     session.load(laps=True, telemetry=True, weather=False, messages=False)
     return session
 
