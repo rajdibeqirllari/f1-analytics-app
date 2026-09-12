@@ -3,3 +3,6 @@ fastf1
 pandas
 numpy
 matplotlib
+f1radio
+requests
+pillow

@@ -205,3 +205,26 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Local Python
+.venv/
+__pycache__/
+*.pyc
+
+# Caches / generated data
+fastf1_cache/
+replay_cache/
+outputs/
+*.log
+
+# Broken old git metadata
+.git_broken/
+
+# Local legacy viewer repository
+f1-race-replay/
+
+# Streamlit secrets - NEVER upload
+.streamlit/secrets.toml
+
+# Backups
+*_backup_*.py

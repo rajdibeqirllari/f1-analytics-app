@@ -2,6 +2,7 @@ import streamlit as st
 import fastf1
 import fastf1.plotting
 from pathlib import Path
+from datetime import date
 import pandas as pd
 import numpy as np
 
@@ -12,13 +13,42 @@ import matplotlib.patches as mpatches
 from matplotlib.lines import Line2D
 import matplotlib.colors as mcolors
 
+# -----------------------------------------------------------------------------
+# App paths / page setup
+# -----------------------------------------------------------------------------
+BASE_DIR = Path(__file__).parent
+ASSET_DIR = BASE_DIR / "assets"
+ASSET_HUD_DIR = ASSET_DIR / "hud"
+OUTPUT_DIR = BASE_DIR / "outputs"
+OUTPUT_CHART_DIR = OUTPUT_DIR / "charts"
+OUTPUT_TELEMETRY_DIR = OUTPUT_DIR / "telemetry"
+OUTPUT_RADIO_DIR = OUTPUT_DIR / "radio"
+OUTPUT_VIDEO_DIR = OUTPUT_DIR / "videos"
+OUTPUT_REPLAY_LOG_DIR = OUTPUT_DIR / "replay_logs"
+OUTPUT_HUD_EXPORT_DIR = OUTPUT_DIR / "hud_exports"
+OUTPUT_HUD_FRAMES_DIR = OUTPUT_DIR / "hud_frames"
+REPLAY_CACHE_DIR = BASE_DIR / "replay_cache"
+RADIO_CACHE_DIR = OUTPUT_RADIO_DIR / "cache"
+RACE_REPLAY_DIR = BASE_DIR / "f1-race-replay"
 
-# 👇 ADD IT RIGHT HERE
-@st.cache_data
-def load_session(year, event, session_type):
-    session = fastf1.get_session(year, event, session_type)
-    session.load(laps=True, telemetry=True, weather=False, messages=False)
-    return session
+for directory in [
+    ASSET_DIR,
+    ASSET_HUD_DIR,
+    OUTPUT_DIR,
+    OUTPUT_CHART_DIR,
+    OUTPUT_TELEMETRY_DIR,
+    OUTPUT_RADIO_DIR,
+    OUTPUT_VIDEO_DIR,
+    OUTPUT_REPLAY_LOG_DIR,
+    OUTPUT_HUD_EXPORT_DIR,
+    OUTPUT_HUD_FRAMES_DIR,
+    REPLAY_CACHE_DIR,
+    RADIO_CACHE_DIR,
+]:
+    directory.mkdir(parents=True, exist_ok=True)
+
+st.set_page_config(page_title="RACE HYPE Studio", page_icon="F1", layout="wide")
+
 
 # -----------------------------------------------------------------------------
 # FastF1 / matplotlib style
@@ -26,13 +56,7 @@ def load_session(year, event, session_type):
 fastf1.plotting.setup_mpl(
     mpl_timedelta_support=False,
     color_scheme="fastf1",
-    misc_mpl_mods=False
-)
-
-image_format = st.selectbox(
-    "Image format",
-    ["16:9 (YouTube)", "1:1 (Instagram)", "9:16 (TikTok)"],
-    index=0
+    #misc_mpl_mods=False
 )
 
 # -----------------------------------------------------------------------------
@@ -146,6 +170,16 @@ def make_racerender_csv(full_tel: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _telemetry_time_column(df: pd.DataFrame) -> str:
+    for col in ["Time", "SessionTime"]:
+        if col in df.columns:
+            return col
+    raise ValueError(
+        "Telemetry data has no Time or SessionTime column. "
+        f"Available columns: {', '.join(map(str, df.columns))}"
+    )
+
+
 def get_figsize(format_mode):
     if format_mode == "16:9 (YouTube)":
         return (16, 9)
@@ -153,6 +187,82 @@ def get_figsize(format_mode):
         return (10, 10)
     if format_mode == "9:16 (TikTok)":
         return (9, 16)
+        
+def make_after_effects_tsv(full_tel: pd.DataFrame, fps: int = 30) -> pd.DataFrame:
+    df = full_tel.copy()
+
+    time_col = _telemetry_time_column(df)
+    required = ["Speed", "RPM", "nGear", "Throttle", "Brake", "X", "Y", "Z"]
+    for col in required:
+        if col not in df.columns:
+            raise ValueError(f"Missing required column for AE TSV: {col}")
+
+    df["time_sec"] = pd.to_timedelta(df[time_col].astype(str)).dt.total_seconds()
+    if df["time_sec"].notna().any():
+        df["time_sec"] = df["time_sec"] - float(df["time_sec"].dropna().iloc[0])
+    df = df.dropna(subset=["time_sec"]).sort_values("time_sec").reset_index(drop=True)
+
+    numeric_cols = ["Speed", "RPM", "nGear", "Throttle", "X", "Y", "Z"]
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    def to_bool(v):
+        if pd.isna(v):
+            return np.nan
+        s = str(v).strip().lower()
+        if s in ["true", "1", "yes"]:
+            return True
+        if s in ["false", "0", "no"]:
+            return False
+        return np.nan
+
+    df["Brake"] = df["Brake"].apply(to_bool)
+    df = df.dropna(subset=["Speed", "RPM", "nGear", "Throttle", "X", "Y", "Z"]).copy()
+    df["Brake"] = df["Brake"].ffill().bfill()
+
+    max_time = df["time_sec"].max()
+    max_frame = int(np.floor(max_time * fps))
+
+    target = pd.DataFrame({"frame": np.arange(0, max_frame + 1, dtype=int)})
+    target["time_sec"] = target["frame"] / fps
+
+    cont_cols = ["Speed", "RPM", "Throttle", "X", "Y", "Z"]
+
+    src_cont = (
+        df[["time_sec"] + cont_cols]
+        .drop_duplicates(subset="time_sec", keep="last")
+        .set_index("time_sec")
+        .sort_index()
+    )
+
+    interp = src_cont.reindex(src_cont.index.union(target["time_sec"]))
+    interp = interp.sort_index().interpolate(method="index")
+    interp = interp.reindex(target["time_sec"]).reset_index(drop=True)
+
+    src_disc = df[["time_sec", "nGear", "Brake"]].copy().sort_values("time_sec")
+
+    nearest = pd.merge_asof(
+        target[["time_sec"]].sort_values("time_sec"),
+        src_disc,
+        on="time_sec",
+        direction="nearest"
+    )
+
+    out = pd.DataFrame({
+        "frame": target["frame"],
+        "Speed": interp["Speed"].round(3),
+        "RPM": interp["RPM"].round(3),
+        "nGear": nearest["nGear"].round().astype(int),
+        "Throttle": interp["Throttle"].round(3),
+        "Brake": nearest["Brake"].astype(bool),
+        "X": interp["X"].round(6),
+        "Y": interp["Y"].round(6),
+        "Z": interp["Z"].round(6),
+    })
+
+    out["Throttle"] = out["Throttle"].clip(lower=0, upper=100)
+
+    return out
 
 # -----------------------------------------------------------------------------
 # Session / telemetry helpers
@@ -164,14 +274,47 @@ def get_session_from_inputs(
     session_name: str | None,
     test_number: int | None,
     day_number: int | None,
+    require_telemetry: bool = False,
 ):
     if mode == "Race Weekend":
-        return load_session(int(year), event_name, session_name)
+        session = fastf1.get_session(int(year), event_name, session_name)
     else:
         session = fastf1.get_testing_session(int(year), int(test_number), int(day_number))
-        session.load(laps=True, telemetry=True, weather=False, messages=False)
-        return session
 
+    errors = []
+
+    # First try what we actually need
+    load_attempts = [
+        dict(laps=True, telemetry=require_telemetry, weather=False, messages=False),
+        dict(laps=True, telemetry=False, weather=False, messages=False),
+        dict(),  # last fallback
+    ]
+
+    for kwargs in load_attempts:
+        try:
+            session.load(**kwargs)
+
+            try:
+                laps = session.laps
+                if laps is not None and len(laps) > 0:
+                    return session
+                errors.append(f"Loaded with {kwargs}, but laps were empty.")
+            except Exception as e:
+                errors.append(f"Loaded with {kwargs}, but session.laps failed: {type(e).__name__}: {e}")
+
+        except Exception as e:
+            errors.append(f"session.load({kwargs}) failed: {type(e).__name__}: {e}")
+
+    raise RuntimeError(
+        "FastF1 could not load lap data for this session.\n\n"
+        "This is usually not your app code. FastF1 opened the session, but timing/lap data was unavailable.\n\n"
+        "Try one of these:\n"
+        "- use an older finished session, for example 2024 Monza Q\n"
+        "- try another 2026 event/session\n"
+        "- use CSV upload mode for 2026\n"
+        "- later we can add OpenF1 fallback\n\n"
+        "Load attempts:\n" + "\n".join(errors)
+    )
 
 def build_selected_lap_tel(
     mode,
@@ -191,6 +334,7 @@ def build_selected_lap_tel(
         session_name=session_name,
         test_number=test_number,
         day_number=day_number,
+        require_telemetry=True,
     )
 
     laps = session.laps.pick_drivers(driver.upper())
@@ -289,6 +433,398 @@ def fastf1_lap_to_tel_df(lap) -> pd.DataFrame:
             "y": tel["Y"].astype(float),
         }
     )
+
+
+def _pick_first_present(d: dict, keys: list[str], default=None):
+    for k in keys:
+        if k in d and pd.notna(d[k]) and str(d[k]).strip() != "":
+            return d[k]
+    return default
+
+
+def _find_local_asset(base_dir: Path, subdir: str, stem: str) -> str | None:
+    asset_dir = base_dir / "assets" / subdir
+    if not asset_dir.exists():
+        return None
+
+    for ext in [".png", ".jpg", ".jpeg", ".webp"]:
+        p = asset_dir / f"{stem}{ext}"
+        if p.exists():
+            return str(p)
+    return None
+
+
+GENERIC_CAR_IMAGE_URL = "https://upload.wikimedia.org/wikipedia/commons/thumb/7/7b/Automobile.svg/512px-Automobile.svg.png"
+F1_CAR_MEDIA_BY_TEAM = {
+    "mercedes": "https://media.formula1.com/image/upload/c_lfill,h_224/q_auto/d_common:f1:2026:fallback:car:2026fallbackcarright.webp/v1740000001/common/f1/2026/mercedes/2026mercedescarright.webp",
+    "ferrari": "https://media.formula1.com/image/upload/c_lfill,h_224/q_auto/d_common:f1:2026:fallback:car:2026fallbackcarright.webp/v1740000001/common/f1/2026/ferrari/2026ferraricarright.webp",
+    "mclaren": "https://media.formula1.com/image/upload/c_lfill,h_224/q_auto/d_common:f1:2026:fallback:car:2026fallbackcarright.webp/v1740000001/common/f1/2026/mclaren/2026mclarencarright.webp",
+    "red_bull": "https://media.formula1.com/image/upload/c_lfill,h_224/q_auto/d_common:f1:2026:fallback:car:2026fallbackcarright.webp/v1740000001/common/f1/2026/red_bull/2026red_bullcarright.webp",
+    "racing_bulls": "https://media.formula1.com/image/upload/c_lfill,h_224/q_auto/d_common:f1:2026:fallback:car:2026fallbackcarright.webp/v1740000001/common/f1/2026/racing_bulls/2026racing_bullscarright.webp",
+    "aston_martin": "https://media.formula1.com/image/upload/c_lfill,h_224/q_auto/d_common:f1:2026:fallback:car:2026fallbackcarright.webp/v1740000001/common/f1/2026/astonmartin/2026astonmartincarright.webp",
+    "alpine": "https://media.formula1.com/image/upload/c_lfill,h_224/q_auto/d_common:f1:2026:fallback:car:2026fallbackcarright.webp/v1740000001/common/f1/2026/alpine/2026alpinecarright.webp",
+    "haas": "https://media.formula1.com/image/upload/c_lfill,h_224/q_auto/d_common:f1:2026:fallback:car:2026fallbackcarright.webp/v1740000001/common/f1/2026/haas/2026haascarright.webp",
+    "williams": "https://media.formula1.com/image/upload/c_lfill,h_224/q_auto/d_common:f1:2026:fallback:car:2026fallbackcarright.webp/v1740000001/common/f1/2026/williams/2026williamscarright.webp",
+    "audi": "https://media.formula1.com/image/upload/c_lfill,h_224/q_auto/d_common:f1:2026:fallback:car:2026fallbackcarright.webp/v1740000001/common/f1/2026/audi/2026audicarright.webp",
+    "cadillac": "https://media.formula1.com/image/upload/c_lfill,h_224/q_auto/d_common:f1:2026:fallback:car:2026fallbackcarright.webp/v1740000001/common/f1/2026/cadillac/2026cadillaccarright.webp",
+}
+
+
+def _team_slug_candidates(team_name: str) -> list[str]:
+    t = team_name.lower().strip()
+    compact = (
+        t.replace("-", " ")
+        .replace("_", " ")
+        .replace(".", " ")
+    )
+    compact = " ".join(compact.split())
+
+    candidates = set()
+    candidates.add(compact.replace(" ", "_"))
+
+    alias_map = {
+        "ferrari": "ferrari",
+        "scuderia ferrari": "ferrari",
+        "scuderia ferrari hp": "ferrari",
+        "audi": "audi",
+        "sauber": "sauber",
+        "stake": "sauber",
+        "kick sauber": "sauber",
+        "mercedes": "mercedes",
+        "mclaren": "mclaren",
+        "williams": "williams",
+        "red bull": "red_bull",
+        "racing bulls": "racing_bulls",
+        "rb": "racing_bulls",
+        "aston martin": "aston_martin",
+        "alpine": "alpine",
+        "haas": "haas",
+    }
+
+    for key, slug in alias_map.items():
+        if key in compact:
+            candidates.add(slug)
+
+    return sorted(candidates)
+
+
+def _resolve_car_image(team_name: str, car_url) -> str:
+    if pd.notna(car_url) and str(car_url).strip():
+        return str(car_url)
+
+    for slug in _team_slug_candidates(team_name):
+        if slug in F1_CAR_MEDIA_BY_TEAM:
+            return F1_CAR_MEDIA_BY_TEAM[slug]
+        local_car = _find_local_asset(BASE_DIR, "cars", slug)
+        if local_car:
+            return local_car
+
+    # Always return a generic car image as final fallback.
+    return GENERIC_CAR_IMAGE_URL
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _build_generic_car_placeholder(team_name: str) -> np.ndarray:
+    """Generate a local placeholder car image to avoid broken remote URLs."""
+    h, w = 120, 260
+    img = np.zeros((h, w, 3), dtype=np.uint8)
+    img[:, :] = np.array([20, 24, 33], dtype=np.uint8)  # dark background
+
+    # Body color derived from team name hash (stable but varied)
+    seed = abs(hash(team_name)) % 255
+    body = np.array([60 + (seed % 120), 80 + ((seed * 3) % 120), 120 + ((seed * 5) % 100)], dtype=np.uint8)
+
+    # Chassis
+    img[50:78, 40:220] = body
+    # Nose
+    img[58:70, 215:248] = body
+    # Cockpit
+    img[42:58, 95:145] = np.array([35, 40, 52], dtype=np.uint8)
+
+    # Wheels (simple circles)
+    yy, xx = np.ogrid[:h, :w]
+    for cx, cy, r in [(72, 84, 14), (188, 84, 14)]:
+        wheel = (xx - cx) ** 2 + (yy - cy) ** 2 <= r ** 2
+        rim = (xx - cx) ** 2 + (yy - cy) ** 2 <= (r - 5) ** 2
+        img[wheel] = np.array([20, 20, 20], dtype=np.uint8)
+        img[rim] = np.array([120, 120, 130], dtype=np.uint8)
+
+    return img
+
+
+def render_driver_media_gallery(session, driver_codes: list[str], heading: str = "Driver & Car Visuals"):
+    codes = [c.strip().upper() for c in driver_codes if c and c.strip()]
+    if not codes:
+        return
+
+    st.markdown(f"### {heading}")
+    cols = st.columns(len(codes))
+
+    for idx, code in enumerate(codes):
+        with cols[idx]:
+            try:
+                drv = session.get_driver(code)
+            except Exception:
+                st.warning(f"No driver data for `{code}`")
+                continue
+
+            first = str(_pick_first_present(drv, ["FirstName"], "")).strip()
+            last = str(_pick_first_present(drv, ["LastName"], "")).strip()
+            broadcast = str(_pick_first_present(drv, ["BroadcastName", "Abbreviation"], code)).strip()
+            full_name = f"{first} {last}".strip() if (first or last) else broadcast
+            team_name = str(_pick_first_present(drv, ["TeamName", "Team"], "Unknown Team")).strip()
+
+            headshot_url = _pick_first_present(
+                drv,
+                ["HeadshotUrl", "headshotUrl", "PhotoUrl", "DriverImageUrl"],
+                None,
+            )
+            car_url = _pick_first_present(
+                drv,
+                ["CarImageUrl", "TeamLogoUrl", "TeamLogo"],
+                None,
+            )
+
+            local_headshot = _find_local_asset(BASE_DIR, "drivers", code)
+            resolved_car_image = _resolve_car_image(team_name, car_url)
+
+            st.caption(code)
+            st.markdown(f"**{full_name}**")
+            st.caption(team_name)
+
+            if headshot_url:
+                st.image(headshot_url, use_container_width=True)
+            elif local_headshot:
+                st.image(local_headshot, use_container_width=True)
+            else:
+                st.info("No driver image found")
+
+            try:
+                st.image(resolved_car_image, width=200)
+            except Exception:
+                st.image(_build_generic_car_placeholder(team_name), width=200)
+
+
+DEFAULT_DRIVER_CODES = [
+    "VER", "PER", "LEC", "SAI", "HAM", "RUS", "NOR", "PIA", "ALO", "STR",
+    "GAS", "OCO", "TSU", "RIC", "ALB", "SAR", "HUL", "MAG", "BOT", "ZHO", "ANT",
+]
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def get_race_event_options(year: int) -> list[str]:
+    try:
+        sched = fastf1.get_event_schedule(int(year), include_testing=False)
+        if "EventName" in sched.columns:
+            vals = [str(v).strip() for v in sched["EventName"].tolist() if pd.notna(v) and str(v).strip()]
+            if vals:
+                return vals
+    except Exception:
+        pass
+
+    if int(year) == 2026 and "FALLBACK_2026_RACES" in globals():
+        return [race["EventName"] for race in FALLBACK_2026_RACES]
+
+    return [
+        "Bahrain",
+        "Saudi Arabia",
+        "Australia",
+        "Japan",
+        "China",
+        "Miami",
+        "Emilia Romagna",
+        "Monaco",
+        "Canada",
+        "Spain",
+        "Austria",
+        "Great Britain",
+        "Hungary",
+        "Belgium",
+        "Netherlands",
+        "Italy",
+        "Azerbaijan",
+        "Singapore",
+        "United States",
+        "Mexico",
+        "Brazil",
+        "Las Vegas",
+        "Qatar",
+        "Abu Dhabi",
+    ]
+
+
+FALLBACK_2026_RACES = [
+    {"RoundNumber": 1, "EventName": "Australian Grand Prix", "RaceDate": "2026-03-08"},
+    {"RoundNumber": 2, "EventName": "Chinese Grand Prix", "RaceDate": "2026-03-15"},
+    {"RoundNumber": 3, "EventName": "Japanese Grand Prix", "RaceDate": "2026-03-29"},
+    {"RoundNumber": 4, "EventName": "Miami Grand Prix", "RaceDate": "2026-05-03"},
+    {"RoundNumber": 5, "EventName": "Canadian Grand Prix", "RaceDate": "2026-05-24"},
+    {"RoundNumber": 6, "EventName": "Monaco Grand Prix", "RaceDate": "2026-06-07"},
+    {"RoundNumber": 7, "EventName": "Barcelona-Catalunya Grand Prix", "RaceDate": "2026-06-14"},
+    {"RoundNumber": 8, "EventName": "Austrian Grand Prix", "RaceDate": "2026-06-28"},
+    {"RoundNumber": 9, "EventName": "British Grand Prix", "RaceDate": "2026-07-05"},
+    {"RoundNumber": 10, "EventName": "Belgian Grand Prix", "RaceDate": "2026-07-19"},
+    {"RoundNumber": 11, "EventName": "Hungarian Grand Prix", "RaceDate": "2026-07-26"},
+    {"RoundNumber": 12, "EventName": "Dutch Grand Prix", "RaceDate": "2026-08-23"},
+    {"RoundNumber": 13, "EventName": "Italian Grand Prix", "RaceDate": "2026-09-06"},
+    {"RoundNumber": 14, "EventName": "Spanish Grand Prix", "RaceDate": "2026-09-13"},
+    {"RoundNumber": 15, "EventName": "Azerbaijan Grand Prix", "RaceDate": "2026-09-27"},
+    {"RoundNumber": 16, "EventName": "Singapore Grand Prix", "RaceDate": "2026-10-11"},
+    {"RoundNumber": 17, "EventName": "United States Grand Prix", "RaceDate": "2026-10-25"},
+    {"RoundNumber": 18, "EventName": "Mexico City Grand Prix", "RaceDate": "2026-11-01"},
+    {"RoundNumber": 19, "EventName": "Sao Paulo Grand Prix", "RaceDate": "2026-11-08"},
+    {"RoundNumber": 20, "EventName": "Las Vegas Grand Prix", "RaceDate": "2026-11-21"},
+    {"RoundNumber": 21, "EventName": "Qatar Grand Prix", "RaceDate": "2026-11-29"},
+    {"RoundNumber": 22, "EventName": "Abu Dhabi Grand Prix", "RaceDate": "2026-12-06"},
+]
+
+
+def get_fallback_schedule(year: int) -> pd.DataFrame:
+    if int(year) == 2026:
+        return pd.DataFrame(FALLBACK_2026_RACES)
+    names = get_race_event_options(int(year))
+    return pd.DataFrame(
+        {
+            "RoundNumber": range(1, len(names) + 1),
+            "EventName": names,
+            "RaceDate": [pd.NaT] * len(names),
+        }
+    )
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def get_event_schedule_safe(year: int) -> pd.DataFrame:
+    try:
+        sched = fastf1.get_event_schedule(int(year), include_testing=False).copy()
+        if sched is not None and len(sched) > 0 and "EventName" in sched.columns:
+            if "RoundNumber" not in sched.columns:
+                sched["RoundNumber"] = range(1, len(sched) + 1)
+            date_col = None
+            for candidate in ["EventDate", "Session5Date", "RaceDate"]:
+                if candidate in sched.columns:
+                    date_col = candidate
+                    break
+            if date_col:
+                sched["RaceDate"] = pd.to_datetime(sched[date_col], errors="coerce").dt.date
+            elif "RaceDate" not in sched.columns:
+                sched["RaceDate"] = pd.NaT
+            return sched
+    except Exception:
+        pass
+    fallback = get_fallback_schedule(int(year))
+    fallback["RaceDate"] = pd.to_datetime(fallback["RaceDate"], errors="coerce").dt.date
+    return fallback
+
+
+def get_latest_completed_race(year: int | None = None, today: date | None = None) -> dict:
+    today = today or date.today()
+    year = int(year or today.year)
+    sched = get_event_schedule_safe(year)
+    if "RaceDate" in sched.columns:
+        dated = sched.dropna(subset=["RaceDate"]).copy()
+        completed = dated[dated["RaceDate"] <= today]
+        if len(completed) > 0:
+            row = completed.sort_values("RaceDate").iloc[-1]
+            return {
+                "year": year,
+                "event_name": str(row["EventName"]),
+                "round_number": int(row["RoundNumber"]) if pd.notna(row["RoundNumber"]) else None,
+                "race_date": row["RaceDate"],
+            }
+    prev = get_event_schedule_safe(year - 1)
+    row = prev.iloc[-1]
+    return {
+        "year": year - 1,
+        "event_name": str(row["EventName"]),
+        "round_number": int(row["RoundNumber"]) if pd.notna(row["RoundNumber"]) else None,
+        "race_date": row.get("RaceDate", None),
+    }
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def get_driver_catalog(
+    mode: str,
+    year: int,
+    event_name: str | None,
+    session_name: str | None,
+    test_number: int | None,
+    day_number: int | None,
+) -> pd.DataFrame:
+    try:
+        if mode == "Race Weekend":
+            s = fastf1.get_session(int(year), event_name, session_name)
+        else:
+            s = fastf1.get_testing_session(int(year), int(test_number), int(day_number))
+
+        s.load(laps=False, telemetry=False, weather=False, messages=False)
+        results = s.results.copy()
+        if results is None or len(results) == 0:
+            raise RuntimeError("No session results")
+
+        rows = []
+        for _, r in results.iterrows():
+            code = str(_pick_first_present(r, ["Abbreviation", "DriverNumber"], "")).strip().upper()
+            if not code:
+                continue
+
+            first = str(_pick_first_present(r, ["FirstName"], "")).strip()
+            last = str(_pick_first_present(r, ["LastName"], "")).strip()
+            full_name = f"{first} {last}".strip() or code
+            team_name = str(_pick_first_present(r, ["TeamName", "Team"], "Unknown Team")).strip()
+
+            rows.append(
+                {
+                    "code": code,
+                    "label": f"{code} - {full_name}",
+                    "team_name": team_name,
+                    "headshot_url": _pick_first_present(r, ["HeadshotUrl", "headshotUrl", "PhotoUrl", "DriverImageUrl"], None),
+                    "car_url": _pick_first_present(r, ["CarImageUrl", "TeamLogoUrl", "TeamLogo"], None),
+                }
+            )
+
+        df = pd.DataFrame(rows).drop_duplicates(subset=["code"]).sort_values("code")
+        if len(df) == 0:
+            raise RuntimeError("No drivers in results")
+        return df
+    except Exception:
+        fallback = pd.DataFrame({"code": DEFAULT_DRIVER_CODES})
+        fallback["label"] = fallback["code"]
+        fallback["team_name"] = "Unknown Team"
+        fallback["headshot_url"] = None
+        fallback["car_url"] = None
+        return fallback
+
+
+def render_driver_picker_preview(driver_catalog: pd.DataFrame, code: str, heading: str):
+    if driver_catalog is None or len(driver_catalog) == 0 or not code:
+        return
+
+    row_df = driver_catalog[driver_catalog["code"] == code.upper()]
+    if len(row_df) == 0:
+        return
+    row = row_df.iloc[0]
+
+    team_name = str(row.get("team_name", "Unknown Team"))
+    headshot_url = row.get("headshot_url", None)
+    car_url = row.get("car_url", None)
+    local_headshot = _find_local_asset(BASE_DIR, "drivers", code.upper())
+    resolved_car_image = _resolve_car_image(team_name, car_url)
+
+    st.caption(heading)
+    # Keep the driver and car previews close together.
+    c_left, c_right, _ = st.columns([1, 1.4, 4])
+    with c_left:
+        if pd.notna(headshot_url) and str(headshot_url).strip():
+            st.image(str(headshot_url), width=80)
+        elif local_headshot:
+            st.image(local_headshot, width=80)
+        else:
+            st.info(f"{code.upper()} image not found")
+    with c_right:
+        try:
+            st.image(resolved_car_image, width=260)
+        except Exception:
+            st.image(_build_generic_car_placeholder(team_name), width=260)
 
 
 # -----------------------------------------------------------------------------
@@ -2115,111 +2651,1289 @@ def render_stint_average_pace(session, drivers: list[str], compound_name: str, o
     save_current_fig(fig, out_path)
 
 
-# -----------------------------------------------------------------------------
-# Paths / cache
-# -----------------------------------------------------------------------------
-BASE_DIR = Path(__file__).parent
-OUTPUT_DIR = BASE_DIR / "outputs"
-OUTPUT_DIR.mkdir(exist_ok=True)
-
 try:
-    BASE_DIR = Path(__file__).parent
     cache_dir = BASE_DIR / "fastf1_cache"
     cache_dir.mkdir(exist_ok=True)
     fastf1.Cache.enable_cache(str(cache_dir))
-except:
+except Exception:
     # fallback for cloud (Streamlit, Render, etc.)
     fastf1.Cache.enable_cache("/tmp/fastf1")
 
 
 # -----------------------------------------------------------------------------
-# UI
+# UI selection state
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="F1 HYPE Generator", layout="wide")
-st.title("F1 HYPE Generator (Local)")
-
-left, right = st.columns([1, 1])
-
-with left:
-    mode = st.selectbox("Mode", ["Race Weekend", "Pre-season Testing"], index=0)
-
-with right:
-    fps = st.selectbox("Export FPS", [25, 30, 50], index=1)
-
-
-create_mode = st.selectbox(
-    "Create",
-    [
-        "Race Telemetry",
-        "Stint strategy",
-        "Lap-by-lap pace delta",
-        "Lap-by-lap delta + stints",
-        "Hard stint average pace",
-        "Medium stint average pace",
-        "Fastest lap map",
-        "Lap consistency",
-        "Driver lap comparison",
-        "Selected driver race pace",
-        "Team race pace delta",
-        "Position Tracker",        # New
-        "Telemetry Comparison",    # New
-        "Speed Trap Analysis",
-        "Gap to Leader",
-        "Tyre Degradation Analysis",
-        "Sector Performance Heatmap",
-        "Car Pace Delta Map",
-    ],
-    index=0,
+from services.export_service import normalize_telemetry
+from services.fastf1_service import load_fastf1_lap_export
+from ui.components import render_header, render_nav
+from ui.styles import inject_styles
+from ui.workspaces import (
+    render_analytics_section,
+    render_files_section,
+    render_hud_export_section,
+    render_live_timing_section,
+    render_overview_section,
+    render_radio_section,
+    render_race_replay_section,
+    render_telemetry_export_section,
 )
 
 
-with st.sidebar:
-    st.subheader("Chart Colors")
-    color_mode_ui = st.selectbox(
-        "Color mode",
-        ["FastF1 Official", "Custom", "Monochrome"],
-        index=0,
-        help="Use official FastF1 colors or override them for chart visuals."
+WORKSPACES = [
+    "Overview",
+    "Live Timing",
+    "Analytics",
+    "Telemetry Export",
+    "HUD Export",
+    "Race Replay",
+    "Radio",
+]
+
+image_format = st.session_state.get("image_format", "16:9 (YouTube)")
+
+
+def _build_fastf1_export_modern(selection: dict):
+    mode = selection.get("mode", "Race Weekend")
+    if mode == "Race Weekend":
+        return load_fastf1_lap_export(
+            int(selection["year"]),
+            selection["event"],
+            selection["session"],
+            selection["driver"],
+            selection.get("lap", "Fastest"),
+            selection.get("lap_number"),
+        )
+    session, _, lap = build_selected_lap_tel(
+        mode=mode,
+        year=int(selection["year"]),
+        event_name=selection.get("event") if mode == "Race Weekend" else None,
+        session_name=selection.get("session") if mode == "Race Weekend" else None,
+        test_number=selection.get("test_number", 1) if mode != "Race Weekend" else None,
+        day_number=selection.get("day_number", 1) if mode != "Race Weekend" else None,
+        driver=selection["driver"],
+        lap_mode=selection.get("lap", "Fastest"),
+        lap_number=selection.get("lap_number"),
+    )
+    raw = lap.get_telemetry()
+    canonical = normalize_telemetry(raw, "FastF1")
+    metadata = {
+        "source": "FastF1",
+        "event": str(session.event.get("EventName", selection.get("event", "Testing"))),
+        "session": str(getattr(session, "name", selection.get("session", "Testing"))),
+        "driver": selection["driver"],
+        "lap_number": int(lap.get("LapNumber", 0) or 0),
+    }
+    return canonical, canonical.copy(), metadata
+
+
+def _generate_analysis_chart_modern(chart_name: str, selection: dict, controls: dict) -> Path:
+    global image_format, COLOR_MODE, CUSTOM_COLOR_A, CUSTOM_COLOR_B
+
+    image_format = selection.get("image_format", "16:9 (YouTube)")
+    COLOR_MODE = selection.get("color_mode", "FastF1 Official")
+    CUSTOM_COLOR_A = st.session_state.get("custom_color_a", "#00D2BE")
+    CUSTOM_COLOR_B = st.session_state.get("custom_color_b", "#DC0000")
+    mode = selection.get("mode", "Race Weekend")
+    session = get_session_from_inputs(
+        mode=mode,
+        year=int(selection["year"]),
+        event_name=selection.get("event") if mode == "Race Weekend" else None,
+        session_name=selection.get("session") if mode == "Race Weekend" else None,
+        test_number=controls.get("test_number") if mode != "Race Weekend" else None,
+        day_number=controls.get("day_number") if mode != "Race Weekend" else None,
+        require_telemetry=chart_name in {
+            "Fastest lap map",
+            "Telemetry Comparison",
+            "Car Pace Delta Map",
+            "Speed Trap Analysis",
+        },
+    )
+    driver_a = str(controls.get("driver_a", selection.get("driver_a", "VER"))).upper()
+    driver_b = str(controls.get("driver_b", selection.get("driver_b", "LEC"))).upper()
+    drivers = [str(value).upper() for value in controls.get("drivers", [])]
+    if not drivers:
+        drivers = [driver_a, driver_b]
+    context = (
+        f"{selection['year']}_{selection.get('event', 'Testing')}_"
+        f"{selection.get('session', 'Test')}_{chart_name}"
+    )
+    safe_context = "".join(
+        char if char.isalnum() or char in "_-" else "_"
+        for char in context
+    ).strip("_")
+    output = OUTPUT_CHART_DIR / f"{safe_context}.png"
+
+    if chart_name == "Fastest lap map":
+        render_fastest_lap_map(session, driver_a, driver_b, output)
+    elif chart_name == "Telemetry Comparison":
+        render_telemetry_comparison(
+            session,
+            int(controls.get("lap_number", 10)),
+            driver_a,
+            driver_b,
+            output,
+        )
+    elif chart_name == "Car Pace Delta Map":
+        render_car_pace_delta_map(
+            session,
+            driver_a,
+            driver_b,
+            output,
+            lap_mode=controls.get("lap_compare_mode", "Fastest laps"),
+            lap_number=controls.get("lap_number"),
+        )
+    elif chart_name == "Sector Performance Heatmap":
+        render_sector_performance_heatmap(session, drivers, output)
+    elif chart_name == "Selected driver race pace":
+        render_selected_driver_race_pace(session, drivers, output)
+    elif chart_name == "Driver lap comparison":
+        render_driver_lap_comparison(session, driver_a, driver_b, output)
+    elif chart_name == "Lap consistency":
+        render_lap_consistency(session, drivers, output)
+    elif chart_name == "Lap-by-lap pace delta":
+        render_lap_delta(session, driver_a, driver_b, output)
+    elif chart_name == "Lap-by-lap delta + stints":
+        render_lap_delta_with_stints(session, driver_a, driver_b, output)
+    elif chart_name == "Stint strategy":
+        render_stint_strategy(session, drivers, output)
+    elif chart_name == "Hard stint average pace":
+        render_stint_average_pace(session, drivers, "HARD", output)
+    elif chart_name == "Medium stint average pace":
+        render_stint_average_pace(session, drivers, "MEDIUM", output)
+    elif chart_name == "Tyre Degradation Analysis":
+        render_tyre_deg_analysis(session, drivers, output)
+    elif chart_name == "Position Tracker":
+        render_position_tracker(session, drivers, output)
+    elif chart_name == "Gap to Leader":
+        render_gap_to_leader(session, drivers, output)
+    elif chart_name == "Team race pace delta":
+        render_team_race_pace_delta(session, output)
+    elif chart_name == "Speed Trap Analysis":
+        render_speed_traps(session, output)
+    else:
+        raise ValueError(f"Unsupported analysis: {chart_name}")
+    return output
+
+
+inject_styles()
+latest_context = get_latest_completed_race(date.today().year)
+active_workspace = st.session_state.get("workspace_nav", "Overview")
+if active_workspace not in WORKSPACES:
+    active_workspace = "Overview"
+if st.session_state.get("workspace_nav_control") not in WORKSPACES:
+    st.session_state["workspace_nav_control"] = active_workspace
+with st.container(key="studio_header"):
+    brand_column, nav_column = st.columns([1.2, 5.8], vertical_alignment="center")
+    with brand_column:
+        render_header(active_workspace)
+    with nav_column:
+        workspace = render_nav(WORKSPACES, active_workspace)
+st.session_state["workspace_nav"] = workspace
+
+shared = {
+    "latest": latest_context,
+    "event_loader": get_race_event_options,
+    "driver_loader": get_driver_catalog,
+}
+if workspace == "Overview":
+    render_overview_section(
+        latest=latest_context,
+        output_dir=OUTPUT_DIR,
+        chart_dir=OUTPUT_CHART_DIR,
+        radio_dir=OUTPUT_RADIO_DIR,
+        replay_dir=REPLAY_CACHE_DIR,
+        fastf1_cache=BASE_DIR / "fastf1_cache",
+    )
+elif workspace == "Live Timing":
+    render_live_timing_section(**shared)
+elif workspace == "Analytics":
+    render_analytics_section(**shared, generate_chart=_generate_analysis_chart_modern)
+elif workspace == "Telemetry Export":
+    render_telemetry_export_section(
+        **shared,
+        fastf1_builder=_build_fastf1_export_modern,
+        output_dir=OUTPUT_TELEMETRY_DIR,
+    )
+elif workspace == "HUD Export":
+    render_hud_export_section(
+        **shared,
+        fastf1_builder=_build_fastf1_export_modern,
+        assets_dir=ASSET_HUD_DIR,
+        output_dir=OUTPUT_HUD_EXPORT_DIR,
+        frames_dir=OUTPUT_HUD_FRAMES_DIR,
+    )
+elif workspace == "Race Replay":
+    render_race_replay_section(**shared, legacy_dir=RACE_REPLAY_DIR)
+elif workspace == "Radio":
+    render_radio_section(
+        **shared,
+        cache_dir=RADIO_CACHE_DIR,
+        output_dir=OUTPUT_RADIO_DIR,
+    )
+elif workspace == "Files":
+    render_files_section(
+        output_dir=OUTPUT_DIR,
+        telemetry_dir=OUTPUT_TELEMETRY_DIR,
+        chart_dir=OUTPUT_CHART_DIR,
+        radio_dir=OUTPUT_RADIO_DIR,
+        replay_dir=REPLAY_CACHE_DIR,
+        assets_dir=ASSET_DIR,
+        hud_export_dir=OUTPUT_HUD_EXPORT_DIR,
+        hud_frames_dir=OUTPUT_HUD_FRAMES_DIR,
     )
 
-    custom_color_a_ui = "#00D2BE"
-    custom_color_b_ui = "#DC0000"
+st.stop()
 
-    if color_mode_ui == "Custom":
-        custom_color_a_ui = st.color_picker("Driver / Series Color A", "#00D2BE")
-        custom_color_b_ui = st.color_picker("Driver / Series Color B", "#DC0000")
-    elif color_mode_ui == "Monochrome":
-        st.caption("Monochrome uses white + purple for cleaner analytics charts.")
+# Retained only as inert migration reference during this incremental refactor.
+_LEGACY_UI_REFERENCE = r'''
+st.markdown(
+    """
+    <div class="f1-hero">
+        <div>
+            <div class="f1-kicker">Telemetry Studio</div>
+            <h1>RACE HYPE</h1>
+            <div class="f1-subcopy">
+                Analyze sessions, replay races, export lap telemetry, and browse public team-radio clips.
+            </div>
+        </div>
+        <div class="f1-topline">
+            <span class="f1-chip">LOCAL</span>
+            <span class="f1-chip">FASTF1</span>
+            <span class="f1-chip">OPENF1</span>
+            <span class="f1-chip">RADIO ARCHIVE</span>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-COLOR_MODE = color_mode_ui
-CUSTOM_COLOR_A = custom_color_a_ui
-CUSTOM_COLOR_B = custom_color_b_ui
-
-chart_mode = create_mode in {
-    "Stint strategy",
-    "Lap-by-lap pace delta",
-    "Lap-by-lap delta + stints",
-    "Hard stint average pace",
-    "Medium stint average pace",
-    "Fastest lap map",
-    "Lap consistency",
-    "Driver lap comparison",
-    "Selected driver race pace",
-    "Team race pace delta",
-    "Position Tracker",        # New
-    "Telemetry Comparison",    # New
-    "Speed Trap Analysis",
-    "Gap to Leader",
-    "Tyre Degradation Analysis",
-    "Sector Performance Heatmap",
-    "Car Pace Delta Map",
+WORKSPACES = ["Overview", "Analytics", "Telemetry Export", "Race Replay", "Radio", "Files"]
+CHART_GROUPS = {
+    "Lap Analysis": [
+        "Fastest lap map",
+        "Telemetry Comparison",
+        "Car Pace Delta Map",
+        "Sector Performance Heatmap",
+    ],
+    "Race Pace": [
+        "Selected driver race pace",
+        "Driver lap comparison",
+        "Lap consistency",
+        "Lap-by-lap pace delta",
+        "Lap-by-lap delta + stints",
+    ],
+    "Strategy": [
+        "Stint strategy",
+        "Hard stint average pace",
+        "Medium stint average pace",
+        "Tyre Degradation Analysis",
+    ],
+    "Race Overview": [
+        "Position Tracker",
+        "Gap to Leader",
+        "Team race pace delta",
+        "Speed Trap Analysis",
+    ],
 }
 
-lap_output_mode = create_mode in {"Race Telemetry"}
+if "workspace_nav" not in st.session_state:
+    st.session_state["workspace_nav"] = "Overview"
+if st.session_state["workspace_nav"] not in WORKSPACES:
+    st.session_state["workspace_nav"] = "Overview"
+
+workspace = st.radio(
+    "Workspace",
+    WORKSPACES,
+    index=WORKSPACES.index(st.session_state["workspace_nav"]),
+    horizontal=True,
+    label_visibility="collapsed",
+    key="workspace_nav",
+)
+
+image_format = st.session_state.get("image_format", "16:9 (YouTube)")
+COLOR_MODE = st.session_state.get("color_mode", "FastF1 Official")
+CUSTOM_COLOR_A = st.session_state.get("custom_color_a", "#00D2BE")
+CUSTOM_COLOR_B = st.session_state.get("custom_color_b", "#DC0000")
+fps = int(st.session_state.get("export_fps", 30))
+mode = st.session_state.get("analysis_mode", "Race Weekend")
+create_mode = "Race Telemetry"
+chart_mode = False
+lap_output_mode = False
+
+if workspace in {"Analytics", "Telemetry Export"}:
+    st.markdown('<div class="f1-panel">', unsafe_allow_html=True)
+    left, right, v1, v2 = st.columns([1.1, 1.0, 1.0, 1.1])
+
+    with left:
+        mode = st.selectbox(
+            "Mode",
+            ["Race Weekend", "Pre-season Testing"],
+            index=["Race Weekend", "Pre-season Testing"].index(st.session_state.get("analysis_mode", "Race Weekend")),
+            key="analysis_mode",
+        )
+    with right:
+        fps = st.selectbox("Export FPS", [25, 30, 50], index=[25, 30, 50].index(fps), key="export_fps")
+    with v1:
+        image_format = st.selectbox(
+            "Image format",
+            ["16:9 (YouTube)", "1:1 (Instagram)", "9:16 (TikTok)"],
+            index=["16:9 (YouTube)", "1:1 (Instagram)", "9:16 (TikTok)"].index(image_format),
+            key="image_format",
+        )
+    with v2:
+        COLOR_MODE = st.selectbox(
+            "Color mode",
+            ["FastF1 Official", "Custom", "Monochrome"],
+            index=["FastF1 Official", "Custom", "Monochrome"].index(COLOR_MODE),
+            help="Use official FastF1 colors or override them for chart visuals.",
+            key="color_mode",
+        )
+
+    if COLOR_MODE == "Custom":
+        c_a, c_b = st.columns(2)
+        with c_a:
+            CUSTOM_COLOR_A = st.color_picker("Driver / Series Color A", CUSTOM_COLOR_A, key="custom_color_a")
+        with c_b:
+            CUSTOM_COLOR_B = st.color_picker("Driver / Series Color B", CUSTOM_COLOR_B, key="custom_color_b")
+
+    if workspace == "Telemetry Export":
+        st.markdown("#### Telemetry Export")
+        source_col, note_col = st.columns([1, 2])
+        with source_col:
+            st.selectbox("Source", ["Auto", "FastF1", "OpenF1", "Upload CSV"], index=0, key="telemetry_source")
+        with note_col:
+            st.info("2026-specific overtake and boost telemetry appears only when exposed by the selected data source.")
+        create_mode = "Race Telemetry"
+        lap_output_mode = True
+    else:
+        category = st.segmented_control(
+            "Chart category",
+            list(CHART_GROUPS.keys()),
+            default=st.session_state.get("chart_category", "Lap Analysis"),
+            key="chart_category",
+        )
+        create_mode = st.selectbox(
+            "Chart",
+            CHART_GROUPS[category],
+            index=0,
+            key=f"chart_choice_{category}",
+        )
+        chart_mode = True
+        lap_output_mode = False
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def parse_driver_list(txt: str) -> list[str]:
     return [x.strip().upper() for x in txt.split(",") if x.strip()]
+
+
+def safe_filename(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in str(value)).strip("_")
+
+
+RADIO_RACE_ALIASES = {
+    "monza": "Italian Grand Prix",
+    "italy": "Italian Grand Prix",
+    "imola": "Emilia Romagna Grand Prix",
+    "silverstone": "British Grand Prix",
+    "spa": "Belgian Grand Prix",
+    "hungaroring": "Hungarian Grand Prix",
+    "zandvoort": "Dutch Grand Prix",
+    "suzuka": "Japanese Grand Prix",
+    "spielberg": "Austrian Grand Prix",
+    "red bull ring": "Austrian Grand Prix",
+    "cota": "United States Grand Prix",
+    "austin": "United States Grand Prix",
+    "interlagos": "Sao Paulo Grand Prix",
+    "bahrain": "Bahrain Grand Prix",
+    "jeddah": "Saudi Arabian Grand Prix",
+    "miami": "Miami Grand Prix",
+    "monaco": "Monaco Grand Prix",
+    "montreal": "Canadian Grand Prix",
+    "canada": "Canadian Grand Prix",
+    "barcelona": "Barcelona-Catalunya Grand Prix",
+    "barcelona-catalunya": "Barcelona-Catalunya Grand Prix",
+    "catalunya": "Barcelona-Catalunya Grand Prix",
+    "baku": "Azerbaijan Grand Prix",
+    "singapore": "Singapore Grand Prix",
+    "mexico": "Mexico City Grand Prix",
+    "las vegas": "Las Vegas Grand Prix",
+    "qatar": "Qatar Grand Prix",
+    "abu dhabi": "Abu Dhabi Grand Prix",
+    "yas marina": "Abu Dhabi Grand Prix",
+}
+
+
+def normalize_radio_race_name(race: str) -> str:
+    race_text = str(race).strip()
+    key = race_text.lower()
+    if key in RADIO_RACE_ALIASES:
+        return RADIO_RACE_ALIASES[key]
+    grand_prix_bases = {v.lower().replace(" grand prix", "") for v in RADIO_RACE_ALIASES.values()}
+    if "grand prix" not in key and key in grand_prix_bases:
+        return f"{race_text} Grand Prix"
+    return race_text
+
+
+def tail_text(path: Path, max_lines: int = 80) -> str:
+    if not path.exists():
+        return ""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return ""
+    return "\n".join(lines[-max_lines:])
+
+
+def is_process_running(pid: int | None) -> bool:
+    if not pid:
+        return False
+    try:
+        import psutil
+
+        return psutil.pid_exists(int(pid))
+    except Exception:
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {int(pid)}"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            return str(pid) in result.stdout
+        except Exception:
+            return False
+
+
+def apply_app_chrome():
+    st.markdown(
+        """
+        <style>
+        :root {
+            --f1-bg: #090B10;
+            --f1-red: #E10600;
+            --f1-yellow: #FACC15;
+            --f1-cyan: #38BDF8;
+            --f1-green: #2CCB70;
+            --f1-panel: #11141B;
+            --f1-panel-soft: #161A23;
+            --f1-border: rgba(255, 255, 255, 0.08);
+            --f1-text: #F5F7FA;
+            --f1-muted: #9DA7B4;
+        }
+
+        .stApp {
+            background:
+                radial-gradient(circle at 12% 0%, rgba(225, 6, 0, 0.14), transparent 28rem),
+                linear-gradient(180deg, #0C0F16 0%, var(--f1-bg) 26rem, #07090D 100%);
+            color: var(--f1-text);
+        }
+
+        .block-container {
+            padding-top: 1.0rem;
+            padding-bottom: 2rem;
+            max-width: 1420px;
+        }
+
+        h1, h2, h3 {
+            letter-spacing: 0;
+        }
+
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #090a10, #11131c);
+            border-right: 1px solid var(--f1-border);
+        }
+
+        div[role="radiogroup"] {
+            gap: 0.55rem;
+            flex-wrap: wrap;
+            background: rgba(17, 20, 27, 0.78);
+            border: 1px solid var(--f1-border);
+            border-radius: 12px;
+            padding: 0.4rem;
+            width: fit-content;
+            max-width: 100%;
+            margin-bottom: 1rem;
+        }
+
+        div[role="radiogroup"] label {
+            background: transparent;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 10px;
+            padding: 0.5rem 0.75rem;
+            margin: 0;
+        }
+
+        div[role="radiogroup"] label:has(input:checked) {
+            border-color: rgba(225, 6, 0, 0.65);
+            background: rgba(225, 6, 0, 0.15);
+        }
+
+        div[role="radiogroup"] label [data-testid="stMarkdownContainer"] p {
+            font-weight: 800;
+        }
+
+        [data-testid="stMetric"],
+        [data-testid="stDataFrame"],
+        .stAlert,
+        div[data-testid="stExpander"] {
+            border: 1px solid var(--f1-border);
+            border-radius: 12px;
+            background: rgba(17, 20, 27, 0.9);
+            box-shadow: 0 18px 48px rgba(0, 0, 0, 0.18);
+        }
+
+        .stButton > button,
+        .stDownloadButton > button {
+            border-radius: 10px;
+            border: 1px solid rgba(225, 6, 0, 0.62);
+            background: linear-gradient(180deg, #ff2a17, #E10600);
+            color: white;
+            font-weight: 700;
+        }
+
+        .stButton > button:hover,
+        .stDownloadButton > button:hover {
+            border-color: #ffd23f;
+            color: white;
+            filter: brightness(1.08);
+        }
+
+        .stSelectbox div[data-baseweb="select"],
+        .stTextInput input,
+        .stNumberInput input {
+            background: var(--f1-panel-soft);
+            border-color: var(--f1-border);
+        }
+
+        .f1-hero {
+            position: relative;
+            display: flex;
+            align-items: end;
+            justify-content: space-between;
+            gap: 1rem;
+            border-left: 4px solid var(--f1-red);
+            padding: 0.25rem 0 0.85rem 1rem;
+            margin-bottom: 0.9rem;
+            max-width: 1220px;
+        }
+
+        .f1-hero h1 {
+            font-size: clamp(2.1rem, 4vw, 3.1rem);
+            line-height: 1;
+            margin: 0.1rem 0 0.35rem;
+            text-transform: uppercase;
+        }
+
+        .f1-kicker {
+            color: var(--f1-yellow);
+            font-size: 0.78rem;
+            font-weight: 800;
+            letter-spacing: 0.18em;
+            text-transform: uppercase;
+        }
+
+        .f1-subcopy {
+            color: var(--f1-muted);
+            max-width: 760px;
+        }
+
+        .f1-topline {
+            display: flex;
+            gap: 0.55rem;
+            flex-wrap: wrap;
+            margin-top: 0.9rem;
+        }
+
+        .f1-chip {
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.055);
+            color: #e8eaf2;
+            font-size: 0.78rem;
+            font-weight: 750;
+            padding: 0.35rem 0.55rem;
+            text-transform: uppercase;
+        }
+
+        .f1-note {
+            border-left: 3px solid var(--f1-cyan);
+            background: rgba(56, 189, 248, 0.075);
+            padding: 0.75rem 0.9rem;
+            border-radius: 0 8px 8px 0;
+            color: #dbeafe;
+            margin: 0.4rem 0 1rem;
+        }
+
+        .f1-panel {
+            border: 1px solid var(--f1-border);
+            background: rgba(17, 20, 27, 0.72);
+            border-radius: 14px;
+            padding: 0.9rem;
+            margin-bottom: 1rem;
+        }
+
+        @media (max-width: 820px) {
+            .f1-hero {
+                align-items: start;
+                flex-direction: column;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_app_header():
+    st.markdown(
+        """
+        <div class="f1-hero">
+            <div class="f1-kicker">Race Control Studio</div>
+            <h1>RACE HYPE Studio</h1>
+            <div class="f1-subcopy">
+                Build race graphics, export HUD telemetry, and pull team-radio clips from one workspace.
+            </div>
+            <div class="f1-topline">
+                <span class="f1-chip">FastF1 telemetry</span>
+                <span class="f1-chip">OpenF1 radio</span>
+                <span class="f1-chip">AE / RaceRender exports</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_radio_session_data(year: int, race: str, session_code: str, force_refresh: bool = False):
+    import f1radio
+
+    requested_race = str(race).strip()
+    resolved_race = normalize_radio_race_name(requested_race)
+    f1radio.set_cache_dir(str(RADIO_CACHE_DIR))
+    session = f1radio.load(
+        int(year),
+        resolved_race,
+        str(session_code).strip().upper(),
+        verbose=False,
+        force_refresh=bool(force_refresh),
+    )
+
+    safe_label = safe_filename(f"radio_{year}_{session.race}_{session.session_type}")
+    csv_path = OUTPUT_RADIO_DIR / f"{safe_label}.csv"
+    json_path = OUTPUT_RADIO_DIR / f"{safe_label}.json"
+    session.export_csv(str(csv_path))
+    session.export_json(str(json_path))
+
+    rows = []
+    for idx, clip in enumerate(session.clips):
+        rows.append(
+            {
+                "idx": idx,
+                "driver": clip.driver,
+                "driver_number": clip.driver_number,
+                "driver_name": clip.driver_name,
+                "team": clip.team,
+                "time": clip.time,
+                "lap": clip.lap,
+                "recording_url": clip.recording_url,
+                "local_path": clip.local_path,
+                "position": clip.context.position,
+                "compound": clip.context.compound,
+                "tyre_age": clip.context.tyre_age,
+                "last_lap": clip.context.last_lap_time,
+            }
+        )
+
+    return {
+        "year": session.year,
+        "requested_race": requested_race,
+        "resolved_race": resolved_race,
+        "race": session.race,
+        "session_type": session.session_type,
+        "csv_path": str(csv_path),
+        "json_path": str(json_path),
+        "clips": rows,
+    }
+
+
+def render_local_radio_exports(error: Exception | None = None) -> bool:
+    local_exports = sorted(OUTPUT_RADIO_DIR.glob("*.csv")) + sorted(BASE_DIR.glob("*radio*.csv"))
+    if not local_exports:
+        return False
+
+    if error is not None:
+        st.warning(f"Live radio load failed, so I switched to local exports: {error}")
+
+    export_path = st.selectbox(
+        "Local radio export",
+        local_exports,
+        format_func=lambda p: p.name,
+    )
+    clips_df = pd.read_csv(export_path)
+    if clips_df.empty:
+        st.info("That export has no clips.")
+        return True
+
+    if "position" not in clips_df.columns and "context_position" in clips_df.columns:
+        clips_df["position"] = clips_df["context_position"]
+    if "compound" not in clips_df.columns and "context_compound" in clips_df.columns:
+        clips_df["compound"] = clips_df["context_compound"]
+
+    clips_df["_row_id"] = range(len(clips_df))
+    counts = clips_df.groupby("driver", dropna=False).size().reset_index(name="clips").sort_values(["clips", "driver"], ascending=[False, True])
+    st.caption(f"Local export contains {len(clips_df)} clips across {counts['driver'].nunique()} drivers.")
+    driver_options = ["ALL"] + sorted(clips_df["driver"].dropna().astype(str).unique().tolist())
+    selected_driver = st.selectbox("Driver", driver_options, index=0, key="local-radio-driver")
+    filtered = clips_df if selected_driver == "ALL" else clips_df[clips_df["driver"] == selected_driver]
+    filtered = filtered.reset_index(drop=True)
+    st.caption(f"Showing {len(filtered)} of {len(clips_df)} clips.")
+
+    labels = []
+    for _, row in filtered.iterrows():
+        lap = "" if pd.isna(row.get("lap", np.nan)) else int(row.get("lap"))
+        pos = "" if pd.isna(row.get("position", np.nan)) else int(row.get("position"))
+        labels.append(f"{int(row['_row_id'])} | {row.get('driver', '-')} | {row.get('time', '-')} | Lap {lap} | P{pos}")
+
+    selected_label = st.selectbox("Radio clip", labels, index=0, key="local-radio-clip")
+    selected_idx = int(selected_label.split("|", 1)[0].strip())
+    selected = clips_df[clips_df["_row_id"] == selected_idx].iloc[0]
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Driver", selected.get("driver", "-"))
+    c2.metric("Lap", "-" if pd.isna(selected.get("lap", np.nan)) else int(selected.get("lap")))
+    c3.metric("Position", "-" if pd.isna(selected.get("position", np.nan)) else f"P{int(selected.get('position'))}")
+    c4.metric("Tyre", "-" if pd.isna(selected.get("compound", np.nan)) else str(selected.get("compound")))
+
+    local_path_value = selected.get("local_path", "")
+    local_path = Path(str(local_path_value)) if pd.notna(local_path_value) and str(local_path_value).strip() else None
+    if local_path and local_path.exists():
+        audio_bytes = local_path.read_bytes()
+        st.audio(audio_bytes, format="audio/mp3")
+        st.download_button(
+            "Download selected MP3",
+            data=audio_bytes,
+            file_name=local_path.name,
+            mime="audio/mpeg",
+            key="local-radio-mp3",
+        )
+    elif pd.notna(selected.get("recording_url", np.nan)) and str(selected.get("recording_url")).strip():
+        st.audio(str(selected.get("recording_url")))
+        st.link_button("Open MP3 source", str(selected.get("recording_url")))
+    else:
+        st.warning("This clip has no playable local file or recording URL.")
+
+    show_cols = [c for c in ["driver", "driver_name", "team", "time", "lap", "position", "compound"] if c in clips_df.columns]
+    st.dataframe(filtered[show_cols], use_container_width=True, hide_index=True)
+    with st.expander("Clip count by driver", expanded=False):
+        st.dataframe(counts, use_container_width=True, hide_index=True)
+    st.download_button(
+        "Download local session CSV",
+        data=export_path.read_bytes(),
+        file_name=export_path.name,
+        mime="text/csv",
+        key="local-radio-csv",
+    )
+    return True
+
+
+def render_radio_messages_section():
+    st.subheader("Radio Messages")
+    st.markdown(
+        """
+        <div class="f1-note">
+            F1 radio data comes from the public OpenF1/FOM timing archive. It is not every private team-radio exchange, so some sessions only expose a handful of short clips.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    try:
+        import f1radio  # noqa: F401
+    except Exception:
+        st.error("The `f1radio` package is not available in this Python environment. Install requirements in the app venv, then reload.")
+        render_local_radio_exports()
+        return
+
+    latest = get_latest_completed_race(date.today().year)
+    latest_label = f"{latest['event_name']} ({latest['race_date']})" if latest.get("race_date") else latest["event_name"]
+    st.markdown(f'<div class="f1-note">Latest completed race default: <strong>{latest_label}</strong></div>', unsafe_allow_html=True)
+
+    existing_query = st.session_state.get(
+        "radio_query",
+        {
+            "year": int(latest["year"]),
+            "race": latest["event_name"],
+            "session": "R",
+            "force_refresh": False,
+        },
+    )
+
+    session_options = ["R", "Q", "SQ", "S", "FP1", "FP2", "FP3"]
+    session_index = session_options.index(existing_query.get("session", "R")) if existing_query.get("session", "R") in session_options else 0
+
+    c1, c2, c3, c4 = st.columns([0.85, 1.8, 0.85, 0.9])
+    with c1:
+        radio_year = st.number_input("Year", min_value=2023, max_value=2035, value=int(existing_query.get("year", latest["year"])), step=1)
+    event_options = get_race_event_options(int(radio_year))
+    default_event = str(existing_query.get("race", latest["event_name"]))
+    if default_event not in event_options and latest["event_name"] in event_options and int(radio_year) == int(latest["year"]):
+        default_event = latest["event_name"]
+    event_index = event_options.index(default_event) if default_event in event_options else 0
+    with c2:
+        radio_race = st.selectbox("Track / Event", event_options, index=event_index)
+    with c3:
+        radio_session = st.selectbox("Session", session_options, index=session_index)
+    with c4:
+        force_refresh = st.checkbox("Refresh cache", value=bool(existing_query.get("force_refresh", False)))
+
+    load_clicked = st.button("Load radio messages", type="primary")
+    use_latest = st.button("Use latest completed race")
+
+    if use_latest:
+        st.session_state["radio_query"] = {
+            "year": int(latest["year"]),
+            "race": latest["event_name"],
+            "session": "R",
+            "force_refresh": False,
+        }
+        st.rerun()
+
+    if load_clicked:
+        st.session_state["radio_query"] = {
+            "year": int(radio_year),
+            "race": radio_race,
+            "session": radio_session,
+            "force_refresh": force_refresh,
+        }
+
+    if "radio_query" not in st.session_state:
+        st.info("Choose a track, driver/session setup, then load radio messages.")
+        return
+
+    query = st.session_state["radio_query"]
+    st.caption(
+        f"Loading request: {query['year']} {query['race']} {query['session']} "
+        f"(resolved as {normalize_radio_race_name(query['race'])})"
+    )
+
+    try:
+        with st.spinner("Loading team radio and cached MP3 files..."):
+            radio_data = load_radio_session_data(
+                query["year"],
+                query["race"],
+                query["session"],
+                query["force_refresh"],
+            )
+    except Exception as e:
+        if not render_local_radio_exports(e):
+            st.error(str(e))
+        return
+
+    clips_df = pd.DataFrame(radio_data["clips"])
+    if clips_df.empty:
+        st.warning("No radio clips found for that session.")
+        return
+
+    st.success(
+        f"{radio_data['race']} {radio_data['session_type']}: {len(clips_df)} public clips ready."
+    )
+    if radio_data["resolved_race"].lower() != radio_data["requested_race"].lower():
+        st.caption(f"Race alias applied: {radio_data['requested_race']} -> {radio_data['resolved_race']}")
+
+    counts = clips_df.groupby("driver", dropna=False).size().reset_index(name="clips").sort_values(["clips", "driver"], ascending=[False, True])
+    c_total, c_drivers, c_top = st.columns(3)
+    c_total.metric("Public clips", len(clips_df))
+    c_drivers.metric("Drivers with clips", counts["driver"].nunique())
+    c_top.metric("Most clips", f"{counts.iloc[0]['driver']} ({int(counts.iloc[0]['clips'])})")
+
+    d1, d2 = st.columns([1, 2])
+    with d1:
+        driver_options = ["ALL"] + sorted(clips_df["driver"].dropna().astype(str).unique().tolist())
+        selected_driver = st.selectbox("Driver", driver_options, index=0, key="radio-driver-filter-v2")
+
+    filtered = clips_df if selected_driver == "ALL" else clips_df[clips_df["driver"] == selected_driver]
+    filtered = filtered.reset_index(drop=True)
+    st.caption(f"Showing {len(filtered)} of {len(clips_df)} clips. Choose ALL to see every public clip in this session.")
+
+    with d2:
+        clip_labels = [
+            f"{int(row.idx)} | {row.driver} | {row.time} | Lap {'' if pd.isna(row.lap) else int(row.lap)} | P{'' if pd.isna(row.position) else int(row.position)}"
+            for row in filtered.itertuples()
+        ]
+        selected_label = st.selectbox("Radio clip", clip_labels, index=0, key="radio-clip-v2")
+
+    selected_idx = int(selected_label.split("|", 1)[0].strip())
+    selected = clips_df[clips_df["idx"] == selected_idx].iloc[0]
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Driver", selected["driver"])
+    m2.metric("Lap", "-" if pd.isna(selected["lap"]) else int(selected["lap"]))
+    m3.metric("Position", "-" if pd.isna(selected["position"]) else f"P{int(selected['position'])}")
+    m4.metric("Tyre", "-" if pd.isna(selected["compound"]) else str(selected["compound"]))
+
+    local_path = Path(str(selected["local_path"]))
+    if local_path.exists():
+        audio_bytes = local_path.read_bytes()
+        st.audio(audio_bytes, format="audio/mp3")
+        st.download_button(
+            "Download selected MP3",
+            data=audio_bytes,
+            file_name=local_path.name,
+            mime="audio/mpeg",
+        )
+    elif selected["recording_url"]:
+        st.audio(str(selected["recording_url"]))
+        st.link_button("Open MP3 source", str(selected["recording_url"]))
+    else:
+        st.warning("This clip has no audio file or recording URL.")
+
+    st.dataframe(
+        filtered[["driver", "driver_name", "team", "time", "lap", "position", "compound", "tyre_age", "last_lap"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    with st.expander("Clip count by driver", expanded=False):
+        st.dataframe(counts, use_container_width=True, hide_index=True)
+
+    csv_path = Path(radio_data["csv_path"])
+    json_path = Path(radio_data["json_path"])
+    c_csv, c_json = st.columns(2)
+    with c_csv:
+        st.download_button(
+            "Download session CSV",
+            data=csv_path.read_bytes(),
+            file_name=csv_path.name,
+            mime="text/csv",
+        )
+    with c_json:
+        st.download_button(
+            "Download session JSON",
+            data=json_path.read_bytes(),
+            file_name=json_path.name,
+            mime="application/json",
+        )
+
+
+def render_race_replay_section():
+    st.subheader("Race Replay")
+    st.markdown(
+        """
+        <div class="f1-note">
+            Browser-native replay runs inside this Streamlit page. It does not open an external viewer, tab, or desktop window.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    latest = get_latest_completed_race(date.today().year)
+    replay_year = st.number_input(
+        "Year",
+        min_value=2018,
+        max_value=2035,
+        value=int(st.session_state.get("replay_year", latest["year"])),
+        step=1,
+        key="replay_year",
+    )
+    schedule = get_event_schedule_safe(int(replay_year))
+    event_names = schedule["EventName"].astype(str).tolist()
+    selected_default = st.session_state.get("replay_event", latest["event_name"])
+    default_event = selected_default if selected_default in event_names else (
+        latest["event_name"] if int(replay_year) == int(latest["year"]) and latest["event_name"] in event_names else event_names[0]
+    )
+    event_index = event_names.index(default_event)
+
+    c1, c2, c3, c4, c5 = st.columns([1.0, 2.0, 1.1, 1.1, 0.95])
+    with c1:
+        st.metric("Latest completed", latest["event_name"])
+    with c2:
+        replay_event = st.selectbox("Event / round", event_names, index=event_index, key="replay_event")
+    selected_row = schedule[schedule["EventName"].astype(str) == replay_event].iloc[0]
+    round_number = int(selected_row["RoundNumber"]) if pd.notna(selected_row["RoundNumber"]) else event_index + 1
+    with c3:
+        replay_session = st.selectbox("Session type", ["Race", "Sprint", "Qualifying", "Sprint Qualifying"], index=0, key="replay_session")
+    with c4:
+        sample_rate = st.selectbox("Sample rate", [4, 5, 8, 10], index=1, format_func=lambda v: f"{v} Hz", key="replay_rate")
+    with c5:
+        refresh_data = st.checkbox("Refresh data", value=False, key="replay_refresh")
+
+    load_col, meta_col = st.columns([1, 3])
+    with load_col:
+        load_replay = st.button("Load Replay", type="primary", use_container_width=True)
+    with meta_col:
+        st.caption(f"Round {round_number} · cached payloads: {len(list_replay_cache())}")
+
+    if load_replay:
+        progress = st.progress(0, text="Preparing replay")
+
+        def update_progress(value, text):
+            progress.progress(min(1.0, float(value)), text=text)
+
+        try:
+            payload = build_replay_payload(
+                int(replay_year),
+                replay_event,
+                replay_session,
+                sample_rate_hz=int(sample_rate),
+                refresh=bool(refresh_data),
+                progress_callback=update_progress,
+            )
+            st.session_state["replay_payload"] = payload
+            st.success("Replay payload ready.")
+        except Exception as e:
+            st.error(f"Replay could not be loaded: {e}")
+            with st.expander("Technical details", expanded=False):
+                st.code(str(e), language="text")
+
+    payload = st.session_state.get("replay_payload")
+    if payload:
+        meta = payload.get("meta", {})
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Event", meta.get("event", replay_event))
+        m2.metric("Session", meta.get("session", replay_session))
+        m3.metric("Frames", len(payload.get("frames", [])))
+        m4.metric("Drivers", len(payload.get("drivers", {})))
+        render_embedded_replay(payload)
+    else:
+        st.info("Choose a session and load the replay. The first build can take a little while; cached reloads are much faster.")
+
+    with st.expander("Advanced", expanded=False):
+        a1, a2, a3 = st.columns(3)
+        with a1:
+            if st.button("Clear replay cache"):
+                removed = clear_replay_cache()
+                st.success(f"Removed {removed} replay payload file(s).")
+        with a2:
+            if payload:
+                st.download_button(
+                    "Download replay payload JSON",
+                    data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                    file_name=f"replay_{safe_filename(str(meta.get('event', replay_event)))}_{meta.get('session', replay_session)}.json",
+                    mime="application/json",
+                )
+        with a3:
+            st.caption("The desktop viewer remains only for troubleshooting.")
+
+        if payload:
+            with st.expander("View technical processing details", expanded=False):
+                st.json(payload.get("technical", {}))
+
+        with st.expander("Legacy desktop viewer", expanded=False):
+            repo_url = "https://github.com/4f4d/f1-race-replay"
+            main_py = RACE_REPLAY_DIR / "main.py"
+            if not main_py.exists():
+                st.warning("Legacy desktop viewer repo is not installed in this workspace.")
+                st.link_button("Open GitHub repo", repo_url)
+            else:
+                no_hud = st.checkbox("No HUD", value=False, key="legacy_no_hud")
+                legacy_refresh = st.checkbox("Refresh legacy data", value=False, key="legacy_refresh")
+                args = [sys.executable, "-u", "main.py", "--viewer", "--year", str(int(replay_year)), "--round", str(round_number)]
+                if replay_session == "Sprint":
+                    args.append("--sprint")
+                elif replay_session == "Sprint Qualifying":
+                    args.append("--sprint-qualifying")
+                elif replay_session == "Qualifying":
+                    args.append("--qualifying")
+                if no_hud:
+                    args.append("--no-hud")
+                if legacy_refresh:
+                    args.append("--refresh-data")
+                st.code(" ".join(args), language="powershell")
+                if st.button("Launch legacy desktop viewer"):
+                    try:
+                        OUTPUT_REPLAY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+                        run_label = safe_filename(f"{int(replay_year)}_{round_number}_{replay_session}")
+                        log_path = OUTPUT_REPLAY_LOG_DIR / f"race_replay_{run_label}.log"
+                        ready_path = OUTPUT_REPLAY_LOG_DIR / f"race_replay_{run_label}.ready"
+                        if ready_path.exists():
+                            ready_path.unlink()
+                        launch_args = args + ["--ready-file", str(ready_path)]
+                        log_file = log_path.open("w", encoding="utf-8", errors="replace")
+                        creationflags = 0
+                        if sys.platform.startswith("win"):
+                            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                        proc = subprocess.Popen(
+                            launch_args,
+                            cwd=str(RACE_REPLAY_DIR),
+                            stdout=log_file,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            creationflags=creationflags,
+                            env={
+                                **os.environ,
+                                "PYTHONUNBUFFERED": "1",
+                                "PYTHONIOENCODING": "utf-8",
+                                "PYTHONUTF8": "1",
+                            },
+                        )
+                        log_file.close()
+                        st.session_state["race_replay_last_log"] = str(log_path)
+                        st.session_state["race_replay_last_ready"] = str(ready_path)
+                        st.session_state["race_replay_last_pid"] = proc.pid
+                        st.session_state["race_replay_last_command"] = " ".join(launch_args)
+                        st.success(f"Legacy viewer started. PID: {proc.pid}")
+                    except Exception as e:
+                        st.error(f"Could not launch legacy desktop viewer: {e}")
+
+            last_log = st.session_state.get("race_replay_last_log")
+            if last_log:
+                log_path = Path(last_log)
+                if log_path.exists():
+                    st.code(tail_text(log_path), language="text")
+                    st.download_button(
+                        "Download replay log",
+                        data=log_path.read_bytes(),
+                        file_name=log_path.name,
+                        mime="text/plain",
+                    )
+
+
+def render_library_section():
+    st.subheader("Files")
+
+    locations = [
+        ("Recent exports", OUTPUT_DIR),
+        ("Telemetry files", OUTPUT_TELEMETRY_DIR),
+        ("Chart images", OUTPUT_CHART_DIR),
+        ("Radio audio", RADIO_CACHE_DIR),
+        ("Radio CSV / JSON", OUTPUT_RADIO_DIR),
+        ("Replay payload cache", REPLAY_CACHE_DIR),
+        ("Assets", ASSET_DIR),
+    ]
+
+    stats_cols = st.columns(3)
+    stats_cols[0].metric("File groups", len(locations))
+    stats_cols[1].metric("Replay payloads", len(list_replay_cache()))
+    stats_cols[2].metric("Radio cache", "Ready" if RADIO_CACHE_DIR.exists() else "Missing")
+
+    for label, folder in locations:
+        folder.mkdir(parents=True, exist_ok=True)
+        files = sorted([p for p in folder.rglob("*") if p.is_file()], key=lambda p: p.stat().st_mtime, reverse=True)[:40]
+        with st.expander(f"{label} - {len(files)} files", expanded=label in {"Telemetry files", "Chart images", "Replay payload cache"}):
+            if not files:
+                st.caption(str(folder))
+                st.info("No files here yet.")
+                continue
+            st.caption(str(folder))
+            file_df = pd.DataFrame(
+                {
+                    "file": [p.name for p in files],
+                    "type": [p.suffix.lower().lstrip(".") or "file" for p in files],
+                    "size_kb": [round(p.stat().st_size / 1024, 1) for p in files],
+                    "modified": [pd.to_datetime(p.stat().st_mtime, unit="s") for p in files],
+                }
+            )
+            st.dataframe(file_df, use_container_width=True, hide_index=True)
+            selected_file = st.selectbox(
+                f"Download from {label}",
+                files,
+                format_func=lambda p: p.name,
+                key=f"download_{safe_filename(label)}",
+            )
+            if selected_file and selected_file.exists():
+                st.download_button(
+                    f"Download {selected_file.name}",
+                    data=selected_file.read_bytes(),
+                    file_name=selected_file.name,
+                    mime="application/octet-stream",
+                    key=f"download_btn_{safe_filename(label)}",
+                )
+
+
+def render_overview_section():
+    latest = get_latest_completed_race(date.today().year)
+    st.subheader("Overview")
+    st.markdown(
+        """
+        <div class="f1-note">
+            Latest race context, data status, recent outputs, and shortcuts into the main workspaces.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Latest completed race", latest["event_name"])
+    c2.metric("Year", latest["year"])
+    c3.metric("Round", latest.get("round_number") or "-")
+    c4.metric("Replay cache", f"{len(list_replay_cache())} payloads")
+
+    s1, s2, s3 = st.columns(3)
+    s1.success("FastF1 cache ready" if (BASE_DIR / "fastf1_cache").exists() else "FastF1 cache missing")
+    s2.info("OpenF1 fallback available in telemetry export")
+    s3.info("Public radio archive available when f1radio has clips")
+
+    qa1, qa2, qa3, qa4 = st.columns(4)
+    if qa1.button("Open latest race analytics", use_container_width=True):
+        st.session_state["workspace_nav"] = "Analytics"
+        st.session_state["analysis_mode"] = "Race Weekend"
+        st.rerun()
+    if qa2.button("Export latest fastest lap", use_container_width=True):
+        st.session_state["workspace_nav"] = "Telemetry Export"
+        st.session_state["analysis_mode"] = "Race Weekend"
+        st.rerun()
+    if qa3.button("Load latest race replay", use_container_width=True):
+        st.session_state["workspace_nav"] = "Race Replay"
+        st.session_state["replay_year"] = int(latest["year"])
+        st.session_state["replay_event"] = latest["event_name"]
+        st.rerun()
+    if qa4.button("Browse latest radio clips", use_container_width=True):
+        st.session_state["workspace_nav"] = "Radio"
+        st.rerun()
+
+    recent_exports = sorted(
+        [p for p in OUTPUT_DIR.rglob("*") if p.is_file()],
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )[:12]
+    r1, r2 = st.columns([1.1, 1])
+    with r1:
+        st.markdown("#### Recent export files")
+        if recent_exports:
+            st.dataframe(
+                pd.DataFrame(
+                    {
+                        "file": [p.name for p in recent_exports],
+                        "folder": [p.parent.name for p in recent_exports],
+                        "size_kb": [round(p.stat().st_size / 1024, 1) for p in recent_exports],
+                        "modified": [pd.to_datetime(p.stat().st_mtime, unit="s") for p in recent_exports],
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info("No exports yet.")
+    with r2:
+        st.markdown("#### Recent chart previews")
+        chart_files = sorted(OUTPUT_CHART_DIR.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)[:3]
+        if chart_files:
+            for path in chart_files:
+                st.image(str(path), caption=path.name, use_container_width=True)
+        else:
+            st.info("Generate a chart to see previews here.")
+
+
+apply_app_chrome()
+
+if workspace == "Overview":
+    render_overview_section()
+    st.stop()
+
+if workspace == "Radio":
+    render_radio_messages_section()
+    st.stop()
+
+if workspace == "Race Replay":
+    render_race_replay_section()
+    st.stop()
+
+if workspace == "Files":
+    render_library_section()
+    st.stop()
 
 
 if mode == "Race Weekend":
@@ -2228,12 +3942,18 @@ if mode == "Race Weekend":
 
         with c1:
             year = st.number_input("Year", min_value=2018, max_value=2035, value=2026, step=1)
+        event_options = get_race_event_options(int(year))
+        latest_for_year = get_latest_completed_race(int(year))
+        default_event_idx = event_options.index(latest_for_year["event_name"]) if latest_for_year["event_name"] in event_options else 0
         with c2:
-            event_name = st.text_input("Event name", value="Bahrain")
+            event_name = st.selectbox("Track / Event", event_options, index=default_event_idx)
         with c3:
             session_name = st.selectbox("Session", ["FP1", "FP2", "FP3", "Q", "R", "SQ", "SS"], index=2)
+        driver_catalog = get_driver_catalog("Race Weekend", year, event_name, session_name, None, None)
+        driver_options = driver_catalog["code"].tolist()
+        default_idx = driver_options.index("LEC") if "LEC" in driver_options else 0
         with c4:
-            driver = st.text_input("Driver code", value="LEC")
+            driver = st.selectbox("Driver", driver_options, index=default_idx, format_func=lambda c: driver_catalog.loc[driver_catalog["code"] == c, "label"].iloc[0] if (driver_catalog["code"] == c).any() else c)
         with c5:
             lap_mode = st.selectbox("Lap", ["Fastest", "Lap number"], index=0)
 
@@ -2241,6 +3961,7 @@ if mode == "Race Weekend":
         if lap_mode == "Lap number":
             lap_number = st.number_input("Lap #", min_value=1, max_value=300, value=1, step=1)
 
+        render_driver_picker_preview(driver_catalog, driver, "Selected Driver")
         normalize_distance = st.checkbox("Normalize Distance to 0-1", value=False)
         btn_generate = st.button("Generate", type="primary")
         if btn_generate:
@@ -2264,10 +3985,12 @@ if mode == "Race Weekend":
                 safe_event = str(event_name).replace(" ", "_")
                 label = driver.upper()
                 csv_name = f"telemetry_{year}_{safe_event}_{session_name}_{label}_{lap_mode}.csv"
+                telemetry_csv = tel_df.to_csv(index=False).encode("utf-8")
+                (OUTPUT_TELEMETRY_DIR / csv_name).write_bytes(telemetry_csv)
 
                 st.download_button(
                     "Download LAP telemetry CSV",
-                    data=tel_df.to_csv(index=False).encode("utf-8"),
+                    data=telemetry_csv,
                     file_name=csv_name,
                     mime="text/csv",
                 )
@@ -2275,14 +3998,29 @@ if mode == "Race Weekend":
                 full_tel = lap.get_telemetry()
                 st.write("Available telemetry columns:")
                 st.write(list(full_tel.columns))
+                full_csv_name = (
+                    f"full_telemetry_{year}_{safe_event}_{session_name}_{label}_{lap_mode}"
+                    f"{'_normalized_distance' if normalize_distance and 'Distance' in full_tel.columns else ''}.csv"
+                )
+                full_csv = full_tel.to_csv(index=False).encode("utf-8")
+                (OUTPUT_TELEMETRY_DIR / full_csv_name).write_bytes(full_csv)
                 st.download_button(
                     "Download FULL Telemetry CSV",
-                    data=full_tel.to_csv(index=False).encode("utf-8"),
-                    file_name=(
-                        f"full_telemetry_{year}_{safe_event}_{session_name}_{label}_{lap_mode}"
-                        f"{'_normalized_distance' if normalize_distance and 'Distance' in full_tel.columns else ''}.csv"
-                    ),
+                    data=full_csv,
+                    file_name=full_csv_name,
                     mime="text/csv",
+                )
+                
+                ae_df = make_after_effects_tsv(full_tel, fps=int(fps))
+                ae_name = f"ae_dataver_{year}_{safe_event}_{session_name}_{label}_{lap_mode}.tsv"
+                ae_tsv = ae_df.to_csv(sep="\t", index=False).encode("utf-8")
+                (OUTPUT_TELEMETRY_DIR / ae_name).write_bytes(ae_tsv)
+
+                st.download_button(
+                    "Download After Effects TSV",
+                    data=ae_tsv,
+                    file_name=ae_name,
+                    mime="text/tab-separated-values",
                 )
 
                 # Optional preprocessing for After Effects: normalize track distance to 0..1.
@@ -2295,13 +4033,16 @@ if mode == "Race Weekend":
                         full_tel["Distance"] = 0.0
 
                 rr_df = make_racerender_csv(full_tel)
+                rr_name = (
+                    f"racerender_{year}_{safe_event}_{session_name}_{label}_{lap_mode}"
+                    f"{'_normalized_distance' if normalize_distance and 'Distance' in full_tel.columns else ''}.csv"
+                )
+                rr_csv = rr_df.to_csv(index=False).encode("utf-8")
+                (OUTPUT_TELEMETRY_DIR / rr_name).write_bytes(rr_csv)
                 st.download_button(
                     "Download RaceRender Telemetry CSV (km/h)",
-                    data=rr_df.to_csv(index=False).encode("utf-8"),
-                    file_name=(
-                        f"racerender_{year}_{safe_event}_{session_name}_{label}_{lap_mode}"
-                        f"{'_normalized_distance' if normalize_distance and 'Distance' in full_tel.columns else ''}.csv"
-                    ),
+                    data=rr_csv,
+                    file_name=rr_name,
                     mime="text/csv",
                 )
 
@@ -2316,14 +4057,20 @@ if mode == "Race Weekend":
 
         with c1:
             year = st.number_input("Year", min_value=2018, max_value=2035, value=2026, step=1)
+        event_options = get_race_event_options(int(year))
+        latest_for_year = get_latest_completed_race(int(year))
+        default_event_idx = event_options.index(latest_for_year["event_name"]) if latest_for_year["event_name"] in event_options else 0
         with c2:
-            event_name = st.text_input("Event name", value="Australia")
+            event_name = st.selectbox("Track / Event", event_options, index=default_event_idx)
         with c3:
             session_name = st.selectbox("Session", ["FP1", "FP2", "FP3", "Q", "R", "SQ", "SS"], index=4)
         with c4:
             st.write("")
             st.write("")
             st.caption("Charts use full session data")
+
+        driver_catalog = get_driver_catalog("Race Weekend", year, event_name, session_name, None, None)
+        driver_options = driver_catalog["code"].tolist()
 
         selected_drivers = []
         compare_driver = None
@@ -2348,10 +4095,14 @@ if mode == "Race Weekend":
 
         if create_mode in {"Lap-by-lap pace delta","Lap-by-lap delta + stints","Fastest lap map","Driver lap comparison","Telemetry Comparison","Car Pace Delta Map",}:
             d1, d2 = st.columns(2)
+            idx_a = driver_options.index("RUS") if "RUS" in driver_options else 0
+            idx_b = driver_options.index("LEC") if "LEC" in driver_options else (1 if len(driver_options) > 1 else 0)
             with d1:
-                driver = st.text_input("Driver A", value="RUS")
+                driver = st.selectbox("Driver A", driver_options, index=idx_a, format_func=lambda c: driver_catalog.loc[driver_catalog["code"] == c, "label"].iloc[0] if (driver_catalog["code"] == c).any() else c)
             with d2:
-                compare_driver = st.text_input("Driver B", value="LEC")
+                compare_driver = st.selectbox("Driver B", driver_options, index=idx_b, format_func=lambda c: driver_catalog.loc[driver_catalog["code"] == c, "label"].iloc[0] if (driver_catalog["code"] == c).any() else c)
+            render_driver_picker_preview(driver_catalog, driver, "Driver A")
+            render_driver_picker_preview(driver_catalog, compare_driver, "Driver B")
         if create_mode == "Telemetry Comparison":
             comp_lap = st.number_input("Lap #", min_value=1, max_value=300, value=10, step=1)
 
@@ -2367,94 +4118,95 @@ if mode == "Race Weekend":
                         session_name=session_name,
                         test_number=None,
                         day_number=None,
+                        require_telemetry=False,
                     )
 
                 safe_event = str(event_name).replace(" ", "_")
 
                 if create_mode == "Stint strategy":
-                    out_path = OUTPUT_DIR / f"stint_strategy_{year}_{safe_event}_{session_name}.png"
+                    out_path = OUTPUT_CHART_DIR / f"stint_strategy_{year}_{safe_event}_{session_name}.png"
                     with st.spinner("Rendering stint strategy chart..."):
                         render_stint_strategy(session, selected_drivers, out_path)
 
                 elif create_mode == "Lap-by-lap pace delta":
-                    out_path = OUTPUT_DIR / f"lap_delta_{year}_{safe_event}_{session_name}_{driver.upper()}_{compare_driver.upper()}.png"
+                    out_path = OUTPUT_CHART_DIR / f"lap_delta_{year}_{safe_event}_{session_name}_{driver.upper()}_{compare_driver.upper()}.png"
                     with st.spinner("Rendering lap-by-lap pace delta..."):
                         render_lap_delta(session, driver.upper(), compare_driver.upper(), out_path)
 
                 elif create_mode == "Lap-by-lap delta + stints":
-                    out_path = OUTPUT_DIR / f"lap_delta_stints_{year}_{safe_event}_{session_name}_{driver.upper()}_{compare_driver.upper()}.png"
+                    out_path = OUTPUT_CHART_DIR / f"lap_delta_stints_{year}_{safe_event}_{session_name}_{driver.upper()}_{compare_driver.upper()}.png"
                     with st.spinner("Rendering lap-by-lap delta + stints..."):
                         render_lap_delta_with_stints(session, driver.upper(), compare_driver.upper(), out_path)
 
                 elif create_mode == "Hard stint average pace":
-                    out_path = OUTPUT_DIR / f"hard_stint_avg_{year}_{safe_event}_{session_name}.png"
+                    out_path = OUTPUT_CHART_DIR / f"hard_stint_avg_{year}_{safe_event}_{session_name}.png"
                     with st.spinner("Rendering hard stint average pace chart..."):
                         render_stint_average_pace(session, selected_drivers, "HARD", out_path)
 
                 elif create_mode == "Medium stint average pace":
-                    out_path = OUTPUT_DIR / f"medium_stint_avg_{year}_{safe_event}_{session_name}.png"
+                    out_path = OUTPUT_CHART_DIR / f"medium_stint_avg_{year}_{safe_event}_{session_name}.png"
                     with st.spinner("Rendering medium stint average pace chart..."):
                         render_stint_average_pace(session, selected_drivers, "MEDIUM", out_path)
                 elif create_mode == "Fastest lap map":
-                    out_path = OUTPUT_DIR / f"fastest_lap_map_{year}_{safe_event}_{session_name}_{driver.upper()}_{compare_driver.upper()}.png"
+                    out_path = OUTPUT_CHART_DIR / f"fastest_lap_map_{year}_{safe_event}_{session_name}_{driver.upper()}_{compare_driver.upper()}.png"
                     with st.spinner("Rendering fastest lap comparison map..."):
                         render_fastest_lap_map(session, driver.upper(), compare_driver.upper(), out_path)
 
                 elif create_mode == "Lap consistency":
-                    out_path = OUTPUT_DIR / f"lap_consistency_{year}_{safe_event}_{session_name}.png"
+                    out_path = OUTPUT_CHART_DIR / f"lap_consistency_{year}_{safe_event}_{session_name}.png"
                     with st.spinner("Rendering lap consistency chart..."):
                         render_lap_consistency(session, selected_drivers, out_path)
 
                 elif create_mode == "Driver lap comparison":
-                    out_path = OUTPUT_DIR / f"driver_lap_comparison_{year}_{safe_event}_{session_name}_{driver.upper()}_{compare_driver.upper()}.png"
+                    out_path = OUTPUT_CHART_DIR / f"driver_lap_comparison_{year}_{safe_event}_{session_name}_{driver.upper()}_{compare_driver.upper()}.png"
                     with st.spinner("Rendering driver lap comparison..."):
                         render_driver_lap_comparison(session, driver.upper(), compare_driver.upper(), out_path)
 
                 elif create_mode == "Selected driver race pace":
-                    out_path = OUTPUT_DIR / f"selected_driver_race_pace_{year}_{safe_event}_{session_name}.png"
+                    out_path = OUTPUT_CHART_DIR / f"selected_driver_race_pace_{year}_{safe_event}_{session_name}.png"
                     with st.spinner("Rendering selected driver race pace..."):
                         render_selected_driver_race_pace(session, selected_drivers, out_path)
 
                 elif create_mode == "Team race pace delta":
-                    out_path = OUTPUT_DIR / f"team_race_pace_delta_{year}_{safe_event}_{session_name}.png"
+                    out_path = OUTPUT_CHART_DIR / f"team_race_pace_delta_{year}_{safe_event}_{session_name}.png"
                     with st.spinner("Rendering team race pace delta..."):
                         render_team_race_pace_delta(session, out_path)
                # --- CORRECTED NEW CODE ---
                 elif create_mode == "Position Tracker":
                     # Changed safe_test -> safe_event and added session_name
-                    out_path = OUTPUT_DIR / f"position_{year}_{safe_event}_{session_name}.png"
+                    out_path = OUTPUT_CHART_DIR / f"position_{year}_{safe_event}_{session_name}.png"
                     with st.spinner("Rendering Position Tracker..."):
                         render_position_tracker(session, selected_drivers, out_path)
 
                 elif create_mode == "Telemetry Comparison":
                     # Added .upper() to match your style and session_name for consistency
-                    out_path = OUTPUT_DIR / f"telemetry_L{comp_lap}_{session_name}_{driver.upper()}_{compare_driver.upper()}.png"
+                    out_path = OUTPUT_CHART_DIR / f"telemetry_L{comp_lap}_{session_name}_{driver.upper()}_{compare_driver.upper()}.png"
                     with st.spinner(f"Rendering Telemetry for Lap {comp_lap}..."):
                         render_telemetry_comparison(session, comp_lap, driver.upper(), compare_driver.upper(), out_path)
 
                 elif create_mode == "Speed Trap Analysis":
                     # Changed safe_test -> safe_event
-                    out_path = OUTPUT_DIR / f"speedtrap_{year}_{safe_event}_{session_name}.png"
+                    out_path = OUTPUT_CHART_DIR / f"speedtrap_{year}_{safe_event}_{session_name}.png"
                     with st.spinner("Rendering Speed Trap Analysis..."):
                         render_speed_traps(session, out_path)
                 # --------------------------------
                 elif create_mode == "Gap to Leader":
-                    out_path = OUTPUT_DIR / f"gap_leader_{year}_{safe_event}_{session_name}.png"
+                    out_path = OUTPUT_CHART_DIR / f"gap_leader_{year}_{safe_event}_{session_name}.png"
                     with st.spinner("Calculating gaps to leader..."):
                         render_gap_to_leader(session, selected_drivers, out_path)
 
                 elif create_mode == "Tyre Degradation Analysis":
-                    out_path = OUTPUT_DIR / f"tyre_deg_{year}_{safe_event}_{session_name}.png"
+                    out_path = OUTPUT_CHART_DIR / f"tyre_deg_{year}_{safe_event}_{session_name}.png"
                     with st.spinner("Analyzing tyre degradation..."):
                         render_tyre_deg_analysis(session, selected_drivers, out_path)
                         
                 elif create_mode == "Sector Performance Heatmap":
-                    out_path = OUTPUT_DIR / f"sector_heatmap_{year}_{safe_event}_{session_name}.png"
+                    out_path = OUTPUT_CHART_DIR / f"sector_heatmap_{year}_{safe_event}_{session_name}.png"
                     with st.spinner("Rendering sector performance heatmap..."):
                         render_sector_performance_heatmap(session, selected_drivers, out_path)
                         
                 elif create_mode == "Car Pace Delta Map":
-                    out_path = OUTPUT_DIR / f"car_pace_map_{year}_{safe_event}_{session_name}_{driver.upper()}_{compare_driver.upper()}.png"
+                    out_path = OUTPUT_CHART_DIR / f"car_pace_map_{year}_{safe_event}_{session_name}_{driver.upper()}_{compare_driver.upper()}.png"
                     with st.spinner("Rendering car pace delta map..."):
                         render_car_pace_delta_map(
                             session,
@@ -2491,8 +4243,11 @@ else:
             test_number = st.number_input("Test #", min_value=1, max_value=3, value=1, step=1)
         with c3:
             day_number = st.number_input("Day #", min_value=1, max_value=7, value=3, step=1)
+        driver_catalog = get_driver_catalog("Pre-season Testing", year, None, None, test_number, day_number)
+        driver_options = driver_catalog["code"].tolist()
+        default_idx = driver_options.index("LEC") if "LEC" in driver_options else 0
         with c4:
-            driver = st.text_input("Driver code", value="LEC")
+            driver = st.selectbox("Driver", driver_options, index=default_idx, format_func=lambda c: driver_catalog.loc[driver_catalog["code"] == c, "label"].iloc[0] if (driver_catalog["code"] == c).any() else c)
         with c5:
             lap_mode = st.selectbox("Lap", ["Fastest", "Lap number"], index=0)
 
@@ -2500,6 +4255,7 @@ else:
         if lap_mode == "Lap number":
             lap_number = st.number_input("Lap #", min_value=1, max_value=300, value=1, step=1)
 
+        render_driver_picker_preview(driver_catalog, driver, "Selected Driver")
         normalize_distance = st.checkbox("Normalize Distance to 0-1", value=False)
         btn_generate = st.button("Generate", type="primary")
         if btn_generate:
@@ -2523,10 +4279,12 @@ else:
                 label = driver.upper()
                 safe_test = f"T{int(test_number)}_D{int(day_number)}"
                 csv_name = f"telemetry_{year}_{safe_test}_{label}_{lap_mode}.csv"
+                telemetry_csv = tel_df.to_csv(index=False).encode("utf-8")
+                (OUTPUT_TELEMETRY_DIR / csv_name).write_bytes(telemetry_csv)
 
                 st.download_button(
                     "Download LAP telemetry CSV",
-                    data=tel_df.to_csv(index=False).encode("utf-8"),
+                    data=telemetry_csv,
                     file_name=csv_name,
                     mime="text/csv",
                 )
@@ -2534,14 +4292,29 @@ else:
                 full_tel = lap.get_telemetry()
                 st.write("Available telemetry columns:")
                 st.write(list(full_tel.columns))
+                full_csv_name = (
+                    f"full_telemetry_{year}_{safe_test}_{label}_{lap_mode}"
+                    f"{'_normalized_distance' if normalize_distance and 'Distance' in full_tel.columns else ''}.csv"
+                )
+                full_csv = full_tel.to_csv(index=False).encode("utf-8")
+                (OUTPUT_TELEMETRY_DIR / full_csv_name).write_bytes(full_csv)
                 st.download_button(
                     "Download FULL Telemetry CSV",
-                    data=full_tel.to_csv(index=False).encode("utf-8"),
-                    file_name=(
-                        f"full_telemetry_{year}_{safe_test}_{label}_{lap_mode}"
-                        f"{'_normalized_distance' if normalize_distance and 'Distance' in full_tel.columns else ''}.csv"
-                    ),
+                    data=full_csv,
+                    file_name=full_csv_name,
                     mime="text/csv",
+                )
+                
+                ae_df = make_after_effects_tsv(full_tel, fps=int(fps))
+                ae_name = f"ae_dataver_{year}_{safe_test}_{label}_{lap_mode}.tsv"
+                ae_tsv = ae_df.to_csv(sep="\t", index=False).encode("utf-8")
+                (OUTPUT_TELEMETRY_DIR / ae_name).write_bytes(ae_tsv)
+
+                st.download_button(
+                    "Download After Effects TSV",
+                    data=ae_tsv,
+                    file_name=ae_name,
+                    mime="text/tab-separated-values",
                 )
 
                 # Optional preprocessing for After Effects: normalize track distance to 0..1.
@@ -2554,13 +4327,16 @@ else:
                         full_tel["Distance"] = 0.0
 
                 rr_df = make_racerender_csv(full_tel)
+                rr_name = (
+                    f"racerender_{year}_{safe_test}_{label}_{lap_mode}"
+                    f"{'_normalized_distance' if normalize_distance and 'Distance' in full_tel.columns else ''}.csv"
+                )
+                rr_csv = rr_df.to_csv(index=False).encode("utf-8")
+                (OUTPUT_TELEMETRY_DIR / rr_name).write_bytes(rr_csv)
                 st.download_button(
                     "Download RaceRender Telemetry CSV (km/h)",
-                    data=rr_df.to_csv(index=False).encode("utf-8"),
-                    file_name=(
-                        f"racerender_{year}_{safe_test}_{label}_{lap_mode}"
-                        f"{'_normalized_distance' if normalize_distance and 'Distance' in full_tel.columns else ''}.csv"
-                    ),
+                    data=rr_csv,
+                    file_name=rr_name,
                     mime="text/csv",
                 )
 
@@ -2579,6 +4355,9 @@ else:
             test_number = st.number_input("Test #", min_value=1, max_value=3, value=1, step=1)
         with c3:
             day_number = st.number_input("Day #", min_value=1, max_value=7, value=3, step=1)
+
+        driver_catalog = get_driver_catalog("Pre-season Testing", year, None, None, test_number, day_number)
+        driver_options = driver_catalog["code"].tolist()
         
         selected_drivers = []
         compare_driver = None
@@ -2592,10 +4371,14 @@ else:
 
         if create_mode in {"Lap-by-lap pace delta", "Lap-by-lap delta + stints", "Fastest lap map", "Driver lap comparison", "Telemetry Comparison"}:
             d1, d2 = st.columns(2)
+            idx_a = driver_options.index("RUS") if "RUS" in driver_options else 0
+            idx_b = driver_options.index("LEC") if "LEC" in driver_options else (1 if len(driver_options) > 1 else 0)
             with d1:
-                driver = st.text_input("Driver A", value="RUS")
+                driver = st.selectbox("Driver A", driver_options, index=idx_a, format_func=lambda c: driver_catalog.loc[driver_catalog["code"] == c, "label"].iloc[0] if (driver_catalog["code"] == c).any() else c)
             with d2:
-                compare_driver = st.text_input("Driver B", value="LEC")
+                compare_driver = st.selectbox("Driver B", driver_options, index=idx_b, format_func=lambda c: driver_catalog.loc[driver_catalog["code"] == c, "label"].iloc[0] if (driver_catalog["code"] == c).any() else c)
+            render_driver_picker_preview(driver_catalog, driver, "Driver A")
+            render_driver_picker_preview(driver_catalog, compare_driver, "Driver B")
 
         btn_generate = st.button("Generate", type="primary")
 
@@ -2609,32 +4392,33 @@ else:
                         session_name=None,
                         test_number=test_number,
                         day_number=day_number,
+                        require_telemetry=False,
                     )
 
                 safe_test = f"T{int(test_number)}_D{int(day_number)}"
 
                 if create_mode == "Stint strategy":
-                    out_path = OUTPUT_DIR / f"stint_strategy_{year}_{safe_test}.png"
+                    out_path = OUTPUT_CHART_DIR / f"stint_strategy_{year}_{safe_test}.png"
                     with st.spinner("Rendering stint strategy chart..."):
                         render_stint_strategy(session, selected_drivers, out_path)
 
                 elif create_mode == "Lap-by-lap pace delta":
-                    out_path = OUTPUT_DIR / f"lap_delta_{year}_{safe_test}_{driver.upper()}_{compare_driver.upper()}.png"
+                    out_path = OUTPUT_CHART_DIR / f"lap_delta_{year}_{safe_test}_{driver.upper()}_{compare_driver.upper()}.png"
                     with st.spinner("Rendering lap-by-lap pace delta..."):
                         render_lap_delta(session, driver.upper(), compare_driver.upper(), out_path)
 
                 elif create_mode == "Lap-by-lap delta + stints":
-                    out_path = OUTPUT_DIR / f"lap_delta_stints_{year}_{safe_test}_{driver.upper()}_{compare_driver.upper()}.png"
+                    out_path = OUTPUT_CHART_DIR / f"lap_delta_stints_{year}_{safe_test}_{driver.upper()}_{compare_driver.upper()}.png"
                     with st.spinner("Rendering lap-by-lap delta + stints..."):
                         render_lap_delta_with_stints(session, driver.upper(), compare_driver.upper(), out_path)
 
                 elif create_mode == "Hard stint average pace":
-                    out_path = OUTPUT_DIR / f"hard_stint_avg_{year}_{safe_test}.png"
+                    out_path = OUTPUT_CHART_DIR / f"hard_stint_avg_{year}_{safe_test}.png"
                     with st.spinner("Rendering hard stint average pace chart..."):
                         render_stint_average_pace(session, selected_drivers, "HARD", out_path)
 
                 elif create_mode == "Medium stint average pace":
-                    out_path = OUTPUT_DIR / f"medium_stint_avg_{year}_{safe_test}.png"
+                    out_path = OUTPUT_CHART_DIR / f"medium_stint_avg_{year}_{safe_test}.png"
                     with st.spinner("Rendering medium stint average pace chart..."):
                         render_stint_average_pace(session, selected_drivers, "MEDIUM", out_path)
 
@@ -2653,3 +4437,4 @@ else:
             except Exception as e:
                 st.error(str(e))
                 st.stop()
+'''

@@ -1,0 +1,36 @@
+<div id="f1-replay-root" class="f1-replay-root" tabindex="0">
+  <div class="replay-shell">
+    <div class="viewer-panel">
+      <canvas id="trackCanvas" width="1280" height="720"></canvas>
+      <div class="status-pill" id="trackStatus">GREEN</div>
+      <div class="time-pill"><span id="elapsed">00:00</span> / <span id="totalTime">00:00</span> · Lap <span id="currentLap">-</span></div>
+    </div>
+    <aside class="side-panel" id="sidePanel">
+      <div class="panel-title" id="leaderboardTitle">Leaderboard</div>
+      <div id="leaderboard" class="leaderboard"></div>
+      <div class="panel-title selected-title">Driver</div>
+      <div id="driverCard" class="driver-card"></div>
+    </aside>
+  </div>
+  <div class="controls-panel">
+    <button id="playPause" class="primary">Play</button>
+    <button id="restart">Restart</button>
+    <button id="back10">-10s</button>
+    <button id="forward10">+10s</button>
+    <select id="speedSelect" aria-label="Playback speed">
+      <option value="0.5">0.5x</option>
+      <option value="1" selected>1x</option>
+      <option value="2">2x</option>
+      <option value="4">4x</option>
+    </select>
+    <label><input type="checkbox" id="labelsToggle" checked> Labels</label>
+    <label><input type="checkbox" id="drsToggle" checked> DRS</label>
+    <label><input type="checkbox" id="leaderboardToggle" checked> Leaderboard</label>
+    <button id="fitTrack">Fit track</button>
+    <button id="fullscreen">Full screen</button>
+  </div>
+  <input id="timeline" class="timeline" type="range" min="0" max="1000" value="0">
+</div>
+<script id="replayPayload" type="application/json">__REPLAY_PAYLOAD__</script>
+<style>__REPLAY_CSS__</style>
+<script>__REPLAY_JS__</script>
