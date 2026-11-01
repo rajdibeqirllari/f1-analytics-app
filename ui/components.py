@@ -37,6 +37,10 @@ def render_nav(workspaces: list[str], active_workspace: str) -> str:
     selected = st.segmented_control(
         "Workspace",
         options=workspaces,
+        format_func=lambda name:{'Overview':'Paddock','Live Timing':'Timing',
+                                 'Analytics':'Lap Lab','Video Studio':'Head to Head',
+                                 'Telemetry Export':'Lap Data','HUD Export':'Overlays',
+                                 'Race Replay':'Replay','Radio':'Team Radio'}.get(name,name),
         default=None if "workspace_nav_control" in st.session_state else active_workspace,
         key="workspace_nav_control",
         label_visibility="collapsed",

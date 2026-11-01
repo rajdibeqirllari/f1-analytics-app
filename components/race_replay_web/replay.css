@@ -231,3 +231,27 @@ label {
     min-height: 280px;
   }
 }
+
+/* Keep the cockpit and its playback controls together inside either host. */
+html, body { margin: 0; background: var(--page-bg); }
+.f1-replay-root { display: grid; gap: 10px; min-height: 0; padding: 10px; }
+.controls-panel { grid-row: 1; margin-top: 0; position: sticky; top: 0; z-index: 5; }
+.timeline { grid-row: 2; margin: 0; }
+.replay-shell { grid-row: 3; grid-template-columns: minmax(0,1fr) 245px; }
+.viewer-panel { min-height: 420px; }
+#trackCanvas { height: 420px; }
+.side-panel { min-height: 0; height: 420px; }
+.leaderboard { min-height: 90px; }
+.driver-card { padding: 8px; }
+.driver-card .stat { padding: 4px 6px; }
+@media (max-width: 700px) {
+  .replay-shell { grid-template-columns: minmax(0,1fr); }
+  .viewer-panel { min-height: 330px; }
+  #trackCanvas { height: 330px; }
+  .side-panel { height: 440px; }
+  .time-pill { font-size: 10px; right: 7px; }
+  .status-pill { left: 7px; font-size: 10px; }
+  .controls-panel { padding: 8px; gap: 6px; }
+  button, select { padding: 0 9px; font-size: 11px; min-height: 34px; }
+  label { font-size: 10px; }
+}

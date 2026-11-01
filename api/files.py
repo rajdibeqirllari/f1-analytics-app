@@ -1,0 +1,52 @@
+"""Opaque file IDs and an explicit output allowlist; no arbitrary path downloads."""
+from hashlib import sha256
+from pathlib import Path
+import os
+from threading import RLock
+
+ROOT=Path(__file__).resolve().parents[1]
+OUTPUT_ROOTS={name:(ROOT/name).resolve() for name in ('outputs','output','charts')}
+TYPES={'.mp4':'Videos','.webm':'Overlays','.mov':'Overlays','.png':'Images','.jpg':'Images',
+       '.csv':'Telemetry','.tsv':'Telemetry','.json':'Data','.mp3':'Audio','.wav':'Audio','.zip':'Sequences'}
+_known={}
+_lock=RLock()
+
+
+def approved(path):
+    resolved=Path(path).resolve()
+    return any(resolved.is_relative_to(base) for base in OUTPUT_ROOTS.values()) and resolved.suffix.lower() in TYPES
+
+
+def descriptor(path):
+    path=Path(path).resolve()
+    if not approved(path) or not path.is_file():
+        raise ValueError('This output is not available for download.')
+    key=sha256(str(path).encode()).hexdigest()[:32]
+    with _lock: _known[key]=path
+    stat=path.stat()
+    return dict(id=key,name=path.name,category=TYPES[path.suffix.lower()],size=stat.st_size,
+                modified=stat.st_mtime,url=f'/api/files/{key}',relative=str(path.relative_to(ROOT)))
+
+
+def library():
+    rows=[]
+    for base in OUTPUT_ROOTS.values():
+        if not base.exists(): continue
+        for directory,dirs,files in os.walk(base,followlinks=False):
+            # Prune before traversal: a HUD sequence may contain hundreds of thousands of frames.
+            dirs[:]=[d for d in dirs if d not in ('cache','hud_frames','uploads') and not Path(directory,d).is_symlink()]
+            for name in files:
+                path=Path(directory,name)
+                if path.suffix.lower() not in TYPES or '.partial.' in name: continue
+                if approved(path): rows.append(descriptor(path))
+    return sorted(rows,key=lambda row:row['modified'],reverse=True)
+
+
+def resolve(key):
+    with _lock: path=_known.get(key)
+    if path and path.is_file() and approved(path): return path
+    for row in library():
+        if row['id']==key:
+            path=ROOT/row['relative']
+            if approved(path): return path
+    raise FileNotFoundError('Output not found.')

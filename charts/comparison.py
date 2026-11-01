@@ -1,0 +1,1 @@
+"""Comparison chart extraction target."""

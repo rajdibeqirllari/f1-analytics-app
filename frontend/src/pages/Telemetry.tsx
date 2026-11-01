@@ -1,0 +1,20 @@
+import {useEffect,useState} from 'react';
+import {useSession,useTask} from '../state';
+import {request} from '../api';
+import {Intro,DriverControls,Field,Button,JobStatus,Download,Empty,Stat,DataTable,SourceNote,ErrorBox} from '../components';
+
+export function SourceControls({source,setSource,upload,setUpload,fps,setFps}:{source:string;setSource:(v:string)=>void;upload:string;setUpload:(v:string)=>void;fps?:number;setFps?:(v:number)=>void}){
+ const [uploadError,setUploadError]=useState(''),[uploading,setUploading]=useState(false);
+ return <><div className="inline-fields"><Field label="Data source"><select value={source} onChange={e=>setSource(e.target.value)}>{['Auto','FastF1','OpenF1','Upload CSV'].map(v=><option key={v}>{v}</option>)}</select></Field>{source==='Upload CSV'&&<Field label={uploading?'Uploading…':upload?'CSV uploaded · ready':'Upload CSV · maximum 10 MB'}><input type="file" accept=".csv,text/csv" disabled={uploading} onChange={async e=>{const file=e.target.files?.[0];if(!file)return;setUploading(true);setUploadError('');setUpload('');const data=new FormData();data.append('file',file);try{const result=await request('/api/uploads',{method:'POST',body:data});setUpload(result.id)}catch(err){setUploadError((err as Error).message)}finally{setUploading(false)}}}/></Field>}{fps!=null&&setFps&&<Field label="Export FPS"><select value={fps} onChange={e=>setFps(Number(e.target.value))}>{[24,25,30,50,60].map(v=><option key={v}>{v}</option>)}</select></Field>}</div><ErrorBox message={uploadError}/></>;
+}
+export default function Telemetry(){
+ const {selection:s,setSelection,catalog}=useSession();const task=useTask();
+ const [source,setSource]=useState('Auto'),[upload,setUpload]=useState(''),[fps,setFps]=useState(30);
+ useEffect(()=>task.reset(),[s.year,s.event,s.session,s.driver,s.lap,source,upload]);
+ const result=task.result;
+ return <section className="workspace"><Intro number="04" title="EVERY LAP." accent="EVERY BYTE.">Take the numbers with you. Inspect a lap. Export it for your edit.</Intro><SourceControls {...{source,setSource,upload,setUpload,fps,setFps}}/>
+ {source==='Upload CSV'?<Field label="Driver label"><input value={s.driver} placeholder="Driver code" maxLength={5} onChange={e=>setSelection({driver:e.target.value.toUpperCase()})}/></Field>:<DriverControls pair={false}/>}
+ <div className="action-row"><SourceNote/><Button disabled={task.busy||(source==='Upload CSV'?!upload:!catalog||!s.event)} onClick={()=>task.start('telemetry',{...s,event:s.event||'Uploaded telemetry'},{source,upload_id:upload,fps})}>Prepare export packages</Button></div><JobStatus task={task}/>
+ {result?<><div className="metric-strip"><Stat label="SOURCE" value={result.metadata.source}/><Stat label="SAMPLES" value={result.rows.toLocaleString()}/><Stat label="DURATION" value={result.duration==null?'—':`${result.duration.toFixed(3)} s`}/><Stat label="LAP" value={result.metadata.lap_number||'Uploaded stream'}/></div>{result.metadata.fallback&&<p className="note">FastF1 was unavailable. Auto used OpenF1. Original error: {result.metadata.fallback}</p>}<div className="export-grid">{result.files.map((file:any)=><div className="export-card" key={file.id}><span className="eyebrow soft">PRODUCTION FORMAT</span><h3>{file.label}</h3><Download file={file}/></div>)}</div><div className="section-heading"><h2>INSPECT THE <em>SAMPLES.</em></h2></div><p className="note">First {result.preview.length} samples of {result.rows.toLocaleString()}. Downloads contain the full exported data.</p><div className="panel"><DataTable rows={result.preview} columns={['time_sec','speed_kmh','rpm','gear','throttle_pct','brake_active','drs_active','source'].map(key=>[key,key.replaceAll('_',' ').toUpperCase()])}/></div><details className="advanced"><summary>All canonical fields</summary><p>{result.columns.join(' · ')}</p></details></>:<Empty title="THE RAW NUMBERS.">Four production packages: selected-lap CSV, full-source CSV, After Effects TSV and RaceRender CSV.</Empty>}
+ </section>;
+}

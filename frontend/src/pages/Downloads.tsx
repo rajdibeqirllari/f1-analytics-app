@@ -1,0 +1,15 @@
+import {useState,useEffect} from 'react';
+import {useResource} from '../state';
+import {type Output} from '../api';
+import {Intro,Field,Button,Download,Empty,ErrorBox} from '../components';
+
+export default function Downloads(){
+ const {value:files,loading,error,refresh}=useResource<Output[]>('/api/files');
+ const [query,setQuery]=useState(''),[category,setCategory]=useState('All files'),[selected,setSelected]=useState<Output|null>(null);
+ useEffect(()=>{if(!selected)return;const close=(event:KeyboardEvent)=>{if(event.key==='Escape')setSelected(null)};window.addEventListener('keydown',close);return()=>window.removeEventListener('keydown',close)},[selected]);
+ const filtered=(files||[]).filter(f=>(category==='All files'||f.category===category)&&f.name.toLowerCase().includes(query.toLowerCase()));
+ return <section className="workspace"><Intro number="08" title="YOUR WORK." accent="READY TO GO.">The clips, charts and data you made. All in one place.</Intro><div className="work-filter"><Field label="Find a file"><input type="search" value={query} placeholder="Search saved outputs…" onChange={e=>setQuery(e.target.value)}/></Field><Field label="Type"><select value={category} onChange={e=>setCategory(e.target.value)}><option>All files</option>{Array.from(new Set(files?.map(f=>f.category)||[])).map(c=><option key={c}>{c}</option>)}</select></Field><Button secondary disabled={loading} onClick={refresh}>Refresh library</Button></div><ErrorBox message={error}/>{loading&&<div className="skeleton" aria-label="Loading output library"/>}
+ <p className="note">{filtered.length} saved files · Generated outputs only</p>{!filtered.length&&!loading?<Empty title="THE NEXT ONE IS YOURS.">Finished videos, charts, telemetry packages, radio and HUD exports will appear here.</Empty>:<div className="library-grid">{filtered.map(file=><div className="file-card" key={file.id}><button className="file-preview" onClick={()=>setSelected(file)} aria-label={'Preview '+file.name}>{file.category==='Images'?<img src={file.url} alt="" loading="lazy"/>:<><span>{file.name.split('.').pop()?.toUpperCase()}</span><small>{file.category}</small></>}</button><div className="file-info"><small>{new Date(file.modified*1000).toLocaleString()}</small><h3 title={file.name}>{file.name}</h3><Download file={file}/></div></div>)}</div>}
+ {selected&&<div className="modal-backdrop" onClick={()=>setSelected(null)}><section className="file-modal" role="dialog" aria-modal="true" aria-label={selected.name} onClick={e=>e.stopPropagation()}><button className="close-modal" aria-label="Close preview" onClick={()=>setSelected(null)} autoFocus>×</button><h2>{selected.name}</h2>{selected.category==='Images'?<img src={selected.url} alt={selected.name}/>:['mp4','webm'].some(ext=>selected.name.endsWith(ext))?<video src={selected.url} controls playsInline/>:selected.category==='Audio'?<audio src={selected.url} controls/>:<p className="note">Download this format to inspect it in your editor.</p>}<Download file={selected}/></section></div>}
+ </section>;
+}

@@ -50,36 +50,16 @@ def session_code_to_openf1_name(code: str) -> str:
 
 
 def find_openf1_session(year: int, event_search: str, session_code: str) -> dict[str, Any]:
-    wanted = session_code_to_openf1_name(session_code).lower()
-    query = str(event_search).lower().replace("grand prix", "").strip()
-    sessions = openf1_get("sessions", {"year": int(year)})
-    matches = []
-    for item in sessions:
-        searchable = " ".join(
-            str(item.get(key, ""))
-            for key in (
-                "country_name",
-                "location",
-                "circuit_short_name",
-                "meeting_name",
-                "meeting_official_name",
-            )
-        ).lower()
-        if str(item.get("session_name", "")).lower() == wanted and query in searchable:
-            matches.append(item)
-    if not matches:
-        raise RuntimeError(
-            f"OpenF1 could not find {event_search} / {session_code} in {year}. "
-            "The session may not be published by OpenF1 yet."
-        )
-    return sorted(matches, key=lambda item: str(item.get("date_start", "")), reverse=True)[0]
+    from services.openf1_comparison import resolve
+    return resolve(year, event_search, session_code)
 
 
 def get_openf1_driver_number(session_key: int, driver_code: str) -> int:
+    from services.openf1_comparison import historical
     code = str(driver_code).strip().upper()
     if code.isdigit():
         return int(code)
-    drivers = openf1_get("drivers", {"session_key": int(session_key)})
+    drivers = historical("drivers", {"session_key": int(session_key)})
     for driver in drivers:
         if str(driver.get("name_acronym", "")).upper() == code:
             return int(driver["driver_number"])
@@ -117,7 +97,7 @@ def car_data_to_canonical(
     missing = sorted(required.difference(car.columns))
     if missing:
         raise RuntimeError(f"OpenF1 car_data is missing columns: {', '.join(missing)}")
-    car["date_dt"] = pd.to_datetime(car["date"], utc=True, errors="coerce")
+    car["date_dt"] = pd.to_datetime(car["date"], utc=True, format='ISO8601', errors="coerce")
     car = car.dropna(subset=["date_dt"]).sort_values("date_dt").reset_index(drop=True)
     if car.empty:
         raise RuntimeError("OpenF1 car_data contained no valid timestamped rows.")
@@ -134,7 +114,7 @@ def car_data_to_canonical(
             "throttle_pct": pd.to_numeric(car["throttle"], errors="coerce").clip(0, 100),
             "brake_active": car["brake"].map(_as_bool),
             "drs_raw": pd.to_numeric(car["drs"], errors="coerce").astype("Int64"),
-            "drs_active": car["drs"].map(_drs_active),
+            "drs_active": car["drs"].map(lambda v: pd.NA if pd.isna(v) else _drs_active(v)).astype('boolean'),
             "distance_m": pd.Series([pd.NA] * count, dtype="Float64"),
             "relative_distance": pd.Series([pd.NA] * count, dtype="Float64"),
             "x": pd.Series([pd.NA] * count, dtype="Float64"),
@@ -157,11 +137,12 @@ def load_openf1_full_session(
     session_code: str,
     driver_code: str,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
+    from services.openf1_comparison import historical
     session = find_openf1_session(year, event_search, session_code)
     session_key = int(session["session_key"])
     driver_number = get_openf1_driver_number(session_key, driver_code)
     # Deliberately no date>= / date<= remote filters.
-    car_data = openf1_get(
+    car_data = historical(
         "car_data",
         {"session_key": session_key, "driver_number": driver_number},
     )
@@ -183,11 +164,12 @@ def load_openf1_lap(
     lap_mode: str,
     lap_number: int | None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any], dict[str, Any]]:
+    from services.openf1_comparison import historical
     session = find_openf1_session(year, event_search, session_code)
     session_key = int(session["session_key"])
     driver_number = get_openf1_driver_number(session_key, driver_code)
     laps = pd.DataFrame(
-        openf1_get(
+        historical(
             "laps",
             {"session_key": session_key, "driver_number": driver_number},
         )
@@ -195,19 +177,24 @@ def load_openf1_lap(
     if laps.empty or not {"lap_duration", "date_start"}.issubset(laps.columns):
         raise RuntimeError("OpenF1 returned no timestamped laps for this driver/session.")
     laps = laps.dropna(subset=["lap_duration", "date_start"]).copy()
+    from services.openf1_comparison import apply_lap_deletions
+    laps = apply_lap_deletions(laps, historical('race_control', {'session_key': session_key}))
     if lap_mode == "Fastest":
+        laps = laps[~laps.deleted]
         if "is_pit_out_lap" in laps:
             laps = laps[laps["is_pit_out_lap"] != True]  # noqa: E712
+        if laps.empty:raise RuntimeError('OpenF1 has no non-deleted timed non-out lap for this driver.')
         lap_row = laps.sort_values("lap_duration").iloc[0]
     else:
         selected = laps[laps["lap_number"] == int(lap_number or 0)]
         if selected.empty:
             raise RuntimeError(f"OpenF1 did not find lap {lap_number}.")
         lap_row = selected.iloc[0]
+        if bool(lap_row.deleted):raise RuntimeError('The selected lap was deleted by race control. Choose a non-deleted lap.')
 
     # Download the complete stream, then crop on local timestamps.
     full, _ = load_openf1_full_session(year, event_search, session_code, driver_code)
-    timestamps = pd.to_datetime(full["date"], utc=True, errors="coerce")
+    timestamps = pd.to_datetime(full["date"], utc=True, format='ISO8601', errors="coerce")
     start = pd.to_datetime(lap_row["date_start"], utc=True)
     end = start + timedelta(seconds=float(lap_row["lap_duration"]))
     lap = full[(timestamps >= start) & (timestamps <= end)].copy()

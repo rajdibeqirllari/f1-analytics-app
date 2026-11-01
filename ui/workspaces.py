@@ -165,6 +165,10 @@ def _driver_codes(
         )
         codes = catalog["code"].dropna().astype(str).tolist()
         if codes:
+            st.session_state['driver_identity_catalog']={'selection':(int(year),event_name,session_name),
+                'entries':{str(row['code']):{'name':str(row.get('label',row['code'])).split(' - ',1)[-1],
+                                           'team':str(row.get('team_name','')),
+                                           'portrait':str(row.get('headshot_url',''))} for _,row in catalog.iterrows()}}
             return codes
     except Exception:
         pass
@@ -315,7 +319,7 @@ def render_live_timing_section(
     event_loader: Callable[[int], list[str]],
     driver_loader: Callable[..., pd.DataFrame],
 ) -> None:
-    section_title("Live Timing", "Session timing, lap performance and race control · Historical data")
+    section_title("Timing", "The session at a glance. Pace, positions and race control.")
     year_hint = int(st.session_state.get("live_timing_year", latest["year"]))
     events = _events_for_year(event_loader, year_hint)
     drivers = ["VER"]
@@ -427,7 +431,7 @@ def render_analytics_section(
     driver_loader: Callable[..., pd.DataFrame],
     generate_chart: Callable[[str, dict[str, Any], dict[str, Any]], Path],
 ) -> None:
-    section_title("Analytics", "Find the story in the sectors, the strategy and the pace.")
+    section_title("Lap Lab", "Find the story in the sectors, the strategy and the pace.")
     year_hint = int(st.session_state.get("analytics_year", latest["year"]))
     events = _events_for_year(event_loader, year_hint)
     event_hint = st.session_state.get("analytics_event", latest["event_name"])
@@ -561,7 +565,7 @@ def render_telemetry_export_section(
     fastf1_builder: Callable[[dict[str, Any]], tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]],
     output_dir: Path,
 ) -> None:
-    section_title("Telemetry Export", "A compact production desk for canonical telemetry files.")
+    section_title("Lap Data", "Take the numbers with you. Choose a lap and download its telemetry.")
     year_hint = int(st.session_state.get("telemetry_export_year", latest["year"]))
     events = _events_for_year(event_loader, year_hint)
     event_hint = st.session_state.get("telemetry_export_event", latest["event_name"])
@@ -877,7 +881,7 @@ def render_hud_export_section(
     output_dir: Path,
     frames_dir: Path,
 ) -> None:
-    section_title("HUD Export", "Generate transparent F1-style HUD overlays with real lap telemetry and alpha.")
+    section_title("Overlays", "Real lap data, ready to layer over your footage.")
     ffmpeg_ok, ffmpeg_detail = ffmpeg_available()
     if ffmpeg_ok:
         status_banner("Alpha video export ready · WebM / MOV / PNG sequence", "good")
@@ -1133,7 +1137,7 @@ def render_race_replay_section(
     driver_loader: Callable[..., pd.DataFrame],
     legacy_dir: Path,
 ) -> None:
-    section_title("Race Replay", "Follow the field. Revisit the moves that changed the race.")
+    section_title("Replay", "Follow the field. Revisit the moves that changed the race.")
     year_hint = int(st.session_state.get("race_replay_year", latest["year"]))
     events = _events_for_year(event_loader, year_hint)
     drivers = ["VER"]
@@ -1257,7 +1261,7 @@ def render_radio_section(
     cache_dir: Path,
     output_dir: Path,
 ) -> None:
-    section_title("Radio", "Scan public team-radio clips, then play and export from one desk.")
+    section_title("Team Radio", "The voices behind the race. Listen, find a moment, save the clip.")
     year_hint = int(st.session_state.get("radio_year", latest["year"]))
     events = _events_for_year(event_loader, year_hint)
     drivers = ["VER"]

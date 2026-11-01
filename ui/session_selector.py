@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import streamlit as st
+from ui.race_identity import event_label,driver_card
 
 
 SESSION_TYPES = ["Race", "Sprint", "Qualifying", "Sprint Qualifying"]
@@ -96,8 +97,9 @@ def render_session_selector(
                 st.session_state["selector_year"] = values["year"]
             elif field == "event":
                 values["event"] = st.selectbox(
-                    "Event",
+                    "Grand Prix",
                     event_options,
+                    format_func=event_label,
                     index=_option_index(event_options, default_event),
                     key=f"{prefix}_event",
                 )
@@ -106,6 +108,8 @@ def render_session_selector(
                 values["session"] = st.selectbox(
                     "Session",
                     RACE_SESSION_CODES,
+                    format_func=lambda code:{'R':'Race','Q':'Qualifying','S':'Sprint','SQ':'Sprint qualifying',
+                                             'FP1':'Practice 1','FP2':'Practice 2','FP3':'Practice 3'}[code],
                     index=_option_index(RACE_SESSION_CODES, default_session, 4),
                     key=f"{prefix}_session",
                 )
@@ -221,4 +225,13 @@ def render_session_selector(
     values.setdefault("source", _state("telemetry_source", "Auto"))
     values.setdefault("image_format", _state("image_format", IMAGE_FORMATS[0]))
     values.setdefault("color_mode", _state("color_mode", COLOR_MODES[0]))
+    identity=st.session_state.get('driver_identity_catalog',{})
+    if identity.get('selection')==(values['year'],values['event'],values['session']):
+        selected_fields=[field for field in ('driver','driver_a','driver_b') if field in fields]
+        if selected_fields:
+            for column,field in zip(st.columns(len(selected_fields)),selected_fields):
+                entry=identity['entries'].get(values[field])
+                if entry:
+                    with column:
+                        st.markdown('<div class="rh-compact-driver">'+driver_card(values[field],entry,'SELECTED DRIVER')+'</div>',unsafe_allow_html=True)
     return values

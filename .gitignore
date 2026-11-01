@@ -228,3 +228,24 @@ f1-race-replay/
 
 # Backups
 *_backup_*.py
+
+# React frontend build products
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+
+# User-supplied licensed audio SDK and banks (local use only).
+assets/sounds/
+distance_filter.lib
+distance_filter.exp
+
+# Rendered videos, render caches and scratch work
+output/
+tmp/
+
+# Backup copies and profiler traces
+*.bak
+profile.json
+
+# Separate git repository (not part of this app)
+sites/taksa-ime/

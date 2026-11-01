@@ -47,7 +47,7 @@ for directory in [
 ]:
     directory.mkdir(parents=True, exist_ok=True)
 
-st.set_page_config(page_title="RACE HYPE Studio", page_icon="F1", layout="wide")
+st.set_page_config(page_title="RACE HYPE | The Paddock", page_icon="🏁", layout="wide")
 
 
 # -----------------------------------------------------------------------------
@@ -615,6 +615,8 @@ DEFAULT_DRIVER_CODES = [
 def get_race_event_options(year: int) -> list[str]:
     try:
         sched = fastf1.get_event_schedule(int(year), include_testing=False)
+        if "EventDate" in sched.columns:
+            sched = sched.sort_values("EventDate",kind="stable")
         if "EventName" in sched.columns:
             vals = [str(v).strip() for v in sched["EventName"].tolist() if pd.notna(v) and str(v).strip()]
             if vals:
@@ -2667,6 +2669,7 @@ from services.export_service import normalize_telemetry
 from services.fastf1_service import load_fastf1_lap_export
 from ui.components import render_header, render_nav
 from ui.styles import inject_styles
+from ui.video_studio import render_video_studio
 from ui.workspaces import (
     render_analytics_section,
     render_files_section,
@@ -2683,6 +2686,7 @@ WORKSPACES = [
     "Overview",
     "Live Timing",
     "Analytics",
+    "Video Studio",
     "Telemetry Export",
     "HUD Export",
     "Race Replay",
@@ -2848,6 +2852,8 @@ elif workspace == "Live Timing":
     render_live_timing_section(**shared)
 elif workspace == "Analytics":
     render_analytics_section(**shared, generate_chart=_generate_analysis_chart_modern)
+elif workspace == "Video Studio":
+    render_video_studio(latest=latest_context,event_loader=get_race_event_options)
 elif workspace == "Telemetry Export":
     render_telemetry_export_section(
         **shared,

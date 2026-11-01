@@ -1,0 +1,9 @@
+{
+  "year": 2022,
+  "event": "French Grand Prix",
+  "parameters": [-0.03452606786695001, 0.939170194516392, 274.4894847678497, -132.75022298367986],
+  "telemetry_origin": [50.96728364732441, -67.20035633423026],
+  "road_origin": [75.84224248107375, 265.83380575037137],
+  "credit": "Paul Ricard F1 circuit by narlankaaditya, CC BY 4.0; scale/materials modified.",
+  "source": "https://sketchfab.com/3d-models/paul-ricard-f1-circuit-d71a363f263a4504aff08d17366e7ccf"
+}

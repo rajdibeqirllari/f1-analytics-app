@@ -1,0 +1,4 @@
+# Keep raw downloaded models/textures local; some prohibit redistribution.
+incoming/
+cars/
+circuits/
