@@ -1,4 +1,4 @@
-import {useEffect,useMemo,useRef,useState} from 'react';
+import {lazy,Suspense,useEffect,useMemo,useRef,useState} from 'react';
 import {request,teamColor} from '../../api';
 import {useSession,useTask,useResource} from '../../state';
 import {PageHead,Choice,Group,Action,JobBar,Blank,Note} from '../kit';
@@ -14,6 +14,10 @@ type Payload={meta:{year:number;event:string;round:number;session:string;duratio
  technical:{frame_count:number;driver_count:number;track_statuses:{start_time:number;end_time:number;label:string}[]}};
 
 const RES=600;
+// Three.js only loads when a viewer opens the 3D view (same component as the Live page).
+const Broadcast3D=lazy(()=>import('../broadcast/Broadcast3D'));
+const hasWebGL=()=>{try{const c=document.createElement('canvas');return !!(c.getContext('webgl2')||c.getContext('webgl'))}catch{return false}};
+const viewStore={get:()=>{try{return localStorage.getItem('rhx-replay-view')==='3d'?'3d':'2d'}catch{return '2d'}},set:(v:string)=>{try{localStorage.setItem('rhx-replay-view',v)}catch{}}};
 const TYRE:Record<string,string>={SOFT:'S',MEDIUM:'M',HARD:'H',INTERMEDIATE:'I',WET:'W'};
 const SESSION:Record<string,string>={R:'Race',Q:'Qualifying',S:'Sprint',SQ:'Sprint qualifying'};
 const STATUS:Record<string,[string,string,string]>={ // label -> [map flag class, text, colour]
@@ -127,8 +131,10 @@ function spaceIsForPlayer(e:KeyboardEvent){
  return !(t instanceof HTMLButtonElement||t instanceof HTMLSelectElement||t instanceof HTMLTextAreaElement||t instanceof HTMLAnchorElement||t.getAttribute('role')==='button'||t.getAttribute('role')==='radio');
 }
 
-function Player({pl,onReload,hidden}:{pl:Payload;onReload:()=>void;hidden?:boolean}){
+function Player({pl,onReload,hidden,scene}:{pl:Payload;onReload:()=>void;hidden?:boolean;scene:string}){
  const g=useMemo(()=>prepare(pl),[pl]);
+ const [view,setView]=useState<'2d'|'3d'>(viewStore.get);const pickView=(v:'2d'|'3d')=>{setView(v);viewStore.set(v)};
+ const webgl=useMemo(hasWebGL,[]);const api=useMemo(()=>({scene,samples:scene+'/samples'}),[scene]);
  const t0=g.t[0],t1=g.t[g.t.length-1];
  const [T,setT]=useState(t0),[playing,setPlaying]=useState(false),[speed,setSpeed]=useState(1),[focus,setFocus]=useState<string|null>(null);
  const live=useRef({playing,speed});live.current={playing,speed};
@@ -168,6 +174,12 @@ function Player({pl,onReload,hidden}:{pl:Payload;onReload:()=>void;hidden?:boole
  const statuses=pl.technical.track_statuses.filter(s=>s.start_time<=T).slice(-12).reverse();
  const mapCars:MapCar[]=rows.filter(r=>r.car).map(r=>{const [x,y]=r.p!=null?atPoint(g,r.p):[r.x,r.y];return {code:r.code,color:r.info.color,position:r.position,x,y,p:r.p,off:r.off,out:r.out}});
  const seek=(v:number)=>setT(Math.max(t0,Math.min(t1,v)));
+ const intervals=rows.map((r,i)=>{const ahead=rows[i-1];return i===0||r.gap==null||ahead?.gap==null?null:typeof r.gap==='string'||typeof ahead.gap==='string'?(typeof r.gap==='string'&&r.gap!==ahead.gap?r.gap:null):r.gap-(ahead.gap as number)});
+ // 3D view: the same instant as the tower. Its clock is this page's playback time, its HUD this tower's classification.
+ const feed={mode:'replay' as const,file:scene,speed,paused:!playing,clock:T,start:t0,end:t1,exact:true};
+ const timing=Object.fromEntries(rows.map((r,i)=>{const int=intervals[i];return [r.code,{pos:r.position<99?r.position:null,laps:Math.max(0,(r.car?.lap??1)-1),
+  interval:int==null?null:typeof int==='string'?int:'+'+Math.max(0,int).toFixed(1),gap:i===0&&race?null:fmtGap(r.gap),inPit:r.off,retired:r.out,stopped:false,out:false}]}));
+ const map=<ReplayMap g={g} cars={mapCars} flag={flag} focus={focus} onFocus={c=>setFocus(focus===c?null:c)}/>;
  return <main className="rhx-page-body rhx-live-page" hidden={hidden}>
   <section className={'rhx-livebar flag-'+flag}>
    <div className="rhx-livebar-event"><span className={'rhx-livedot '+(playing?'on':'')}/>Replay<b>{pl.meta.event}</b><span>{pl.meta.year} · {SESSION[pl.meta.session]||pl.meta.session}</span></div>
@@ -183,10 +195,17 @@ function Player({pl,onReload,hidden}:{pl:Payload;onReload:()=>void;hidden?:boole
    <div className="rhx-seg is-inline">{[1,2,5,10,30].map(v=><button type="button" key={v} className={speed===v?'on':''} onClick={()=>setSpeed(v)}>{v}×</button>)}</div>
   </div>
 
+  <div className="rhx-viewswitch"><div className="rhx-seg is-inline" role="group" aria-label="Circuit view">
+    <button type="button" className={view==='2d'?'on':''} aria-pressed={view==='2d'} onClick={()=>pickView('2d')}>2D Map</button>
+    <button type="button" className={view==='3d'?'on':''} aria-pressed={view==='3d'} onClick={()=>pickView('3d')}>3D Broadcast</button></div>
+   <small>{view==='3d'?'Click a driver in the timing tower to ride with them. Camera and driver only change your screen.':'Recorded positions on the circuit map.'}</small></div>
+  {view==='3d'&&!hidden&&(webgl?<Suspense fallback={<p className="rhx-note" role="status">Loading the 3D view…</p>}>
+    <Broadcast3D feed={feed} focus={focus} onFocus={setFocus} rows={rows.map(r=>({number:r.code,code:r.code,position:r.position,color:r.info.color,knocked_out:false}))} fallback={map} api={api} timing={timing}/></Suspense>
+   :<div className="rhx-b3d-nogl"><p className="rhx-note">This browser has no WebGL, so the 3D view can't run here. The 2D map shows the same positions.</p>{map}</div>)}
   <div className="rhx-livegrid">
    <div className="rhx-tower-wrap rhx-livetower">
     <table className="rhx-tower is-live"><thead><tr><th>Pos</th><th>Driver</th><th>Gap</th><th>Int</th><th>Best</th><th>Last</th><th>Lap</th><th>Speed</th><th>Tyre</th></tr></thead>
-     <tbody>{rows.map((r,i)=>{const ahead=rows[i-1];const int=i===0||r.gap==null||ahead?.gap==null?null:typeof r.gap==='string'||typeof ahead.gap==='string'?(typeof r.gap==='string'&&r.gap!==ahead.gap?r.gap:null):r.gap-(ahead.gap as number);
+     <tbody>{rows.map((r,i)=>{const int=intervals[i];
       return <tr key={r.code} className={[r.out?'is-out':'',focus===r.code?'on':''].join(' ')} style={{'--team':teamColor(r.info.color)} as React.CSSProperties} onClick={()=>setFocus(focus===r.code?null:r.code)}>
       <td className="rhx-pos">{r.position<99?r.position:'—'}</td>
       <td className="rhx-who"><b>{r.code}</b>{r.out?<em className="pit">OUT</em>:r.off?<em className="pit">PIT</em>:r.car?.drs_active?<em className="out">DRS</em>:null}</td>
@@ -198,7 +217,7 @@ function Player({pl,onReload,hidden}:{pl:Payload;onReload:()=>void;hidden?:boole
     <p className="rhx-legend-line"><span className="rhx-fastest-key"/>Fastest <span className="rhx-pb-key"/>Personal best · Gaps and lap times are measured from recorded positions, to about a tenth. Space plays and pauses.</p>
    </div>
    <aside className="rhx-liveside">
-    <div className="rhx-livemap-wrap"><ReplayMap g={g} cars={mapCars} flag={flag} focus={focus} onFocus={c=>setFocus(focus===c?null:c)}/>
+    <div className="rhx-livemap-wrap">{map}
      {rows.some(r=>r.off&&!r.out)&&<div className="rhx-pitlane"><span>Pit lane</span>{rows.filter(r=>r.off&&!r.out).map(r=>
       <b key={r.code} style={{'--team':teamColor(r.info.color)} as React.CSSProperties}>{r.code}</b>)}</div>}
      <small className="rhx-livemap-note">{pl.meta.source==='OpenF1'?`Car positions from OpenF1 (FastF1 had no data for this session), ${pl.meta.sample_rate_hz} samples a second. Speed is worked out from positions; gear, throttle, brake and DRS aren't included.`:`Recorded positions, ${pl.meta.sample_rate_hz} samples a second, smoothed along the track.`}</small></div>
@@ -229,7 +248,8 @@ export default function Replay(){
  async function clearCache(){setError('');try{await request('/api/replay-cache',{method:'DELETE'});cache.refresh()}catch(e){setError((e as Error).message)}}
  const load=()=>task.start('replay',s,{sample_rate:rate,refresh});
  // The player stays mounted while the settings are open, so position, speed and the focused driver survive.
- const player=data&&<Player pl={data} onReload={()=>setSettings(true)} hidden={settings}/>;
+ const scene=r?String(r.data||String(r.viewer).replace(/\/viewer$/,'/data')).replace(/\/data$/,'/scene'):'';
+ const player=data&&<Player pl={data} onReload={()=>setSettings(true)} hidden={settings} scene={scene}/>;
  if(data&&!settings)return player;
  return <>{player}<main className="rhx-page-body">
   <PageHead title="Rewind. Relive." lede="Every car on the circuit from recorded positions, on the live timing screen. Play, pause, scrub, change speed and follow one driver.">

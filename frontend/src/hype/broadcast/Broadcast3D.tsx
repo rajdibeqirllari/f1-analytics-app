@@ -1,8 +1,9 @@
-/** 3D Broadcast view for the Live page (lazy-loaded with Three.js). Camera, driver and position-source choices are
- * this viewer's own (localStorage); nothing here changes the engine's playback. */
+/** 3D Broadcast view for the Live and Replay pages (lazy-loaded with Three.js). Camera, driver and position-source
+ * choices are this viewer's own (localStorage); nothing here changes the engine's playback. On Replay the page passes
+ * its own clock (feed.exact), its scene endpoints (api) and its classification at the displayed instant (timing). */
 import {useEffect,useRef,useState,type ReactNode} from 'react';
 import {BroadcastEngine,type CameraMode,type Hud} from './engine';
-import type {FeedInfo,SceneInfo} from './data';
+import type {FeedInfo,SceneInfo,TimingRow} from './data';
 import './broadcast.css';
 
 type Row={number:string;code:string;position:number;color:string;knocked_out:boolean};
@@ -12,7 +13,10 @@ const hms=(s:number|null)=>s==null||!Number.isFinite(s)?'—':`${Math.floor(s/36
 const utc=(t:number|null)=>t==null?'':new Date(t*1000).toISOString().slice(11,19)+' UTC';
 const metres=(m:number)=>m<1000?`${Math.round(m)} m`:`${(m/1000).toFixed(2)} km`;
 
-export default function Broadcast3D({feed,focus,onFocus,rows,fallback}:{feed:FeedInfo;focus:string|null;onFocus:(n:string|null)=>void;rows:Row[];fallback:ReactNode}){
+const LIVE_API={scene:'/api/live/scene',samples:'/api/live/scene/samples'};
+
+export default function Broadcast3D({feed,focus,onFocus,rows,fallback,api=LIVE_API,timing=null}:{feed:FeedInfo;focus:string|null;onFocus:(n:string|null)=>void;rows:Row[];fallback:ReactNode;
+ api?:{scene:string;samples:string};timing?:Record<string,TimingRow>|null}){
  const host=useRef<HTMLDivElement>(null),eng=useRef<BroadcastEngine|null>(null);
  const [glErr,setGlErr]=useState('');
  const [mode,setMode]=useState<CameraMode>(()=>(store.get('camera','pod') as CameraMode));
@@ -22,28 +26,30 @@ export default function Broadcast3D({feed,focus,onFocus,rows,fallback}:{feed:Fee
 
  useEffect(()=>{if(!host.current)return;let e:BroadcastEngine;
   try{e=new BroadcastEngine(host.current,h=>setHud(h))}catch(x){setGlErr('This browser could not start WebGL, so the 3D view is off. The 2D map below still works.');return}
-  eng.current=e;return()=>{e.dispose();eng.current=null}},[]);
+  e.samplesBase=api.samples;eng.current=e;return()=>{e.dispose();eng.current=null}},[]);
+ useEffect(()=>{if(eng.current)eng.current.samplesBase=api.samples},[api.samples]);
+ useEffect(()=>{eng.current?.setTiming(timing)},[timing]);
 
  // The scene for this recording and source. Recorded positions load in the background on the engine; poll until ready.
  const fileKey=feed.file+'|'+feed.mode;
  useEffect(()=>{let alive=true,t:any;setSceneErr('');
-  const load=async()=>{try{const r=await fetch(`/api/live/scene?source=${pref==='estimated'?'estimated':'auto'}`);
+  const load=async()=>{try{const r=await fetch(`${api.scene}?source=${pref==='estimated'?'estimated':'auto'}`);
     if(!r.ok){let d='';try{d=(await r.json()).detail}catch{d=r.statusText}throw new Error(d)}
     const s:SceneInfo=await r.json();if(!alive)return;
     setInfo(prev=>prev&&prev.key===s.key&&prev.ok===s.ok&&prev.recorded.status===s.recorded.status&&prev.recorded.progress===s.recorded.progress?prev:s);
-    if(s.recorded.status==='loading')t=setTimeout(load,2000)}
+    if(s.recorded.status==='loading'||s.loading)t=setTimeout(load,1500)}
    catch(e){if(alive){setSceneErr((e as Error).message);t=setTimeout(load,5000)}}};
-  load();return()=>{alive=false;clearTimeout(t)}},[fileKey,pref,retry]);
+  load();return()=>{alive=false;clearTimeout(t)}},[fileKey,pref,retry,api.scene]);
 
  const builtKey=useRef('');
- useEffect(()=>{const e=eng.current;if(!e||!info)return;const k=info.ok?info.key:'none|'+info.error;if(builtKey.current!==k){builtKey.current=k;e.setScene(info,pref==='estimated'?'estimated':'auto')}},[info,pref]);
+ useEffect(()=>{const e=eng.current;if(!e||!info)return;const k=info.ok?info.key:info.loading?'loading':'none|'+info.error;if(builtKey.current!==k){builtKey.current=k;e.setScene(info,pref==='estimated'?'estimated':'auto')}},[info,pref]);
  useEffect(()=>{eng.current?.setFeed(feed)},[feed]);
  useEffect(()=>{eng.current?.setFocus(focus)},[focus]);
  useEffect(()=>{eng.current?.setMode(mode);store.set('camera',mode)},[mode]);
 
- const unavailable=glErr||(info&&!info.ok?(info.error||'No circuit geometry for this session.'):'');
+ const unavailable=glErr||(info&&!info.ok&&!info.loading?(info.error||'No circuit geometry for this session.'):'');
  const t=hud?.timing;const lap=t?(hud!.totalLaps?`${Math.min(hud!.totalLaps,t.laps+1)}/${hud!.totalLaps}`:`${t.laps}`):'—';
- const status=!info?'Building the circuit…':hud?.error?hud.error:hud?.buffering?'Loading positions…':
+ const status=!info||info.loading?'Building the circuit…':hud?.error?hud.error:hud?.buffering?'Loading positions…':
   hud&&hud.flag==='none'&&hud.num?(t?.inPit?`${hud.code} is in the pit lane. ${info.source==='estimated'?'The timing feed has no pit-lane positions, so the car is not drawn.':''}`:t?.retired?`${hud.code} has retired.`:`No position for ${hud.code} at this moment.`):'';
  const recBusy=info?.recorded?.status==='loading';
  const drivers=[...rows].filter(r=>!r.knocked_out).sort((a,b)=>a.position-b.position);
@@ -65,7 +71,7 @@ export default function Broadcast3D({feed,focus,onFocus,rows,fallback}:{feed:Fee
     </div>}
     <div className={'rhx-b3d-source is-'+(info?.source||'none')} title={info?.detail}>
      <b>{info?.label||'3D Broadcast'}</b><small>{info?.session?`${info.session.year||''} ${info.session.meeting} · ${info.session.name}`:''}</small>
-     <small className="clock">{hud?.elapsed!=null?`${hms(hud.elapsed)} into the recording · ${utc(hud.utc)}`:''}</small>
+     <small className="clock">{hud?.elapsed!=null?feed.exact?`${hms(hud.elapsed)} into the session`:`${hms(hud.elapsed)} into the recording · ${utc(hud.utc)}`:''}</small>
      {recBusy&&<small>Loading recorded positions… {Math.round((info!.recorded.progress||0)*100)}%</small>}
     </div>
     {hud?.cam&&<div className="rhx-b3d-camtag">{hud.cam}{hud.battle&&<> · battle with {hud.battle}</>}</div>}

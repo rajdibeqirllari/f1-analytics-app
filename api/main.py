@@ -264,6 +264,27 @@ def replay_data(key:str):
     return Response(json.dumps(body,ensure_ascii=False,separators=(',',':')),media_type='application/json')
 
 
+
+# 3D Broadcast on the Replay page: native-rate positions for the loaded replay, on the replay's own clock.
+from services.replay_scene import ReplayScenes
+_replay_scenes=ReplayScenes()
+
+
+@app.get('/api/replays/{key}/scene')
+def replay_scene(key:str):
+    payload=replays.get(key)
+    if not payload: raise HTTPException(404,'Reload the replay after restarting the server.')
+    return _replay_scenes.describe(key,payload)
+
+
+@app.get('/api/replays/{key}/scene/samples')
+def replay_scene_samples(key:str,t0:float,t1:float,source:str='auto',step:float=0.25):
+    payload=replays.get(key)
+    if not payload: raise HTTPException(404,'Reload the replay after restarting the server.')
+    if not (t1>t0) or t1-t0>900: raise HTTPException(422,'Ask for a window of up to 15 minutes.')
+    try: return _replay_scenes.samples(key,payload,t0,t1)
+    except ValueError as exc: raise HTTPException(409,str(exc))
+
 @app.get('/api/replay-cache')
 def replay_cache(): return [{'name':p.name,'size':p.stat().st_size} for p in list_replay_cache()]
 

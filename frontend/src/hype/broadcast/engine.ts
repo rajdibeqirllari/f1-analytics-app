@@ -49,6 +49,10 @@ export class BroadcastEngine{
  cars=new Map<string,CarObject>();labels=new Map<string,string>();buf:Buffer|null=null;prev:Buffer|null=null;
  hints=new Map<string,number>();headings=new Map<string,number>();correction=new Map<string,{v:number;at:number}>();
  feed:FeedInfo|null=null;focus:string|null=null;mode:CameraMode='pod';source='auto';
+ /** Where samples come from (Live: the engine's feed; Replay: the loaded replay) and, on Replay, the page's own
+  * classification at the displayed instant (the replay payload has no timing feed). */
+ samplesBase='/api/live/scene/samples';external:Record<string,TimingRow>|null=null;
+ env={street:false,night:false};hemi:THREE.HemisphereLight;sun:THREE.DirectionalLight;amb:THREE.AmbientLight;
  gen=0;inflight:AbortController|null=null;lastFetch=0;fetchErr='';raf=0;timer:any=0;ro:ResizeObserver;lastHud=0;onHud:(h:Hud)=>void;
  sites:Site[]=[];site=-1;cutAt=0;look=new THREE.Vector3();lookReady=false;fov=40;battle:string|null=null;camDir=new THREE.Vector3(1,0,0);camReady=false;lastSel:Pose|null=null;ghosted=false;
  disposed=false;
@@ -64,8 +68,9 @@ export class BroadcastEngine{
   gr.addColorStop(0,'#5d86b3');gr.addColorStop(.55,'#a9c2d8');gr.addColorStop(1,'#d9d6cb');sx.fillStyle=gr;sx.fillRect(0,0,4,256);
   const bg=new THREE.CanvasTexture(sky);bg.colorSpace=THREE.SRGBColorSpace;this.scene.background=bg;
   this.scene.fog=new THREE.Fog(0xb9cad8,350,3200);
-  this.scene.add(new THREE.HemisphereLight(0xdfeeff,0x5a6648,1.25));
-  const sun=new THREE.DirectionalLight(0xfff1dc,1.9);sun.position.set(-600,900,400);this.scene.add(sun);
+  this.hemi=new THREE.HemisphereLight(0xdfeeff,0x5a6648,1.25);this.scene.add(this.hemi);
+  this.sun=new THREE.DirectionalLight(0xfff1dc,1.9);this.sun.position.set(-600,900,400);this.scene.add(this.sun);
+  this.amb=new THREE.AmbientLight(0xffffff,0);this.scene.add(this.amb);
   this.scene.add(this.world);
   this.ro=new ResizeObserver(()=>this.resize());this.ro.observe(el);this.resize();
   this.timer=setInterval(()=>this.pump(),250);
@@ -85,6 +90,26 @@ export class BroadcastEngine{
  resetMotion(){this.gen++;this.inflight?.abort();this.inflight=null;this.buf=null;this.prev=null;this.hints.clear();this.headings.clear();this.correction.clear();
   this.site=-1;this.lookReady=false;this.camReady=false;this.battle=null;this.lastFetch=0}
 
+ setTiming(t:Record<string,TimingRow>|null){this.external=t}
+ timingOf(num:string,D:number,buf:Buffer|null):TimingRow|null{return this.external?this.external[num]??null:buf?buf.timingAt(num,D):null}
+
+ /** Street circuit (walls and fences close to the asphalt, buildings, no grass) and/or night race (floodlights). */
+ applyEnv(meeting:string){
+  const m=meeting.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+  const street=/las vegas|monaco|singapore|azerbaijan|baku|saudi|jeddah|miami|madrid/.test(m);
+  const night=/las vegas|singapore|bahrain|saudi|jeddah|qatar|abu dhabi/.test(m);
+  this.env={street,night};
+  const sky=document.createElement('canvas');sky.width=4;sky.height=256;const sx=sky.getContext('2d')!;const gr=sx.createLinearGradient(0,0,0,256);
+  if(night){gr.addColorStop(0,'#03050b');gr.addColorStop(.6,'#10162a');gr.addColorStop(1,'#3a2a44')}
+  else{gr.addColorStop(0,'#5d86b3');gr.addColorStop(.55,'#a9c2d8');gr.addColorStop(1,'#d9d6cb')}
+  sx.fillStyle=gr;sx.fillRect(0,0,4,256);const bg=new THREE.CanvasTexture(sky);bg.colorSpace=THREE.SRGBColorSpace;
+  (this.scene.background as THREE.Texture|null)?.dispose?.();this.scene.background=bg;
+  this.scene.fog=night?new THREE.Fog(0x0b0f1c,300,2600):new THREE.Fog(0xb9cad8,350,3200);
+  // Night: floodlit track, so plenty of cool fill light but no sun.
+  this.hemi.color.set(night?0xc4ceff:0xdfeeff);this.hemi.groundColor.set(night?0x2a2830:0x5a6648);this.hemi.intensity=night?1.05:1.25;
+  this.sun.color.set(night?0xbfd0ff:0xfff1dc);this.sun.intensity=night?0.55:1.9;this.amb.intensity=night?0.45:0;
+  this.renderer.toneMappingExposure=night?1.15:1.05}
+
  setFeed(f:FeedInfo){this.feed=f;const r=this.clock.update(f,performance.now());if(r!=='ok')this.resetMotion();this.pump()}
  setFocus(n:string|null){if(n!==this.focus){this.focus=n;this.site=-1;this.lookReady=false;this.camReady=false;this.battle=null}}
  setMode(m:CameraMode){if(m!==this.mode){this.mode=m;this.site=-1;this.lookReady=false;this.camReady=false}}
@@ -92,6 +117,7 @@ export class BroadcastEngine{
  setScene(info:SceneInfo,source:string){
   this.source=source;this.info=info;this.resetMotion();this.clearWorld();this.track=null;
   if(!info.ok||!info.track?.x?.length)return;
+  this.applyEnv(info.session?.meeting||'');
   const tr=this.track=new TrackCurve(info.track);
   this.sites=this.buildSites(tr);
   this.buildWorld(tr,info);
@@ -113,7 +139,8 @@ export class BroadcastEngine{
   for(let i=0;i<pa.count;i++){const x=pa.getX(i)+(minx+maxx)/2,y=-(pa.getZ(i))+(miny+maxy)/2;const q=nearTrack(x,y);const k=Math.min(1,Math.max(0,(q.d-120)/700));
    pa.setXYZ(i,x,(q.low*(1-k)+Math.min(zmean,q.low+8)*k)-2.6-Math.min(3,q.d/250),-y)}
   terr.computeVertexNormals();
-  const grass=noiseTexture([70,96,52],26,256);grass.repeat.set(gw/40,gh/40);
+  const env=this.env;
+  const grass=env.street?noiseTexture([50,52,56],14,256):noiseTexture([70,96,52],26,256);grass.repeat.set(gw/40,gh/40);
   this.world.add(new THREE.Mesh(terr,lam({map:grass})));
   // Grass verges at track height, sloping down outwards, cut short where another part of the circuit is close.
   const reach=(side:number)=>{const out=new Float32Array(n).fill(HALF+38);
@@ -122,7 +149,7 @@ export class BroadcastEngine{
      if(hit){lim=Math.max(HALF+1,o-6);break}}
     for(let k=0;k<3&&i+k<n;k++)out[i+k]=lim}
    return out};
-  const verge=noiseTexture([82,110,60],22,128);
+  const verge=env.street?noiseTexture([66,68,72],10,128):noiseTexture([82,110,60],22,128);   // street: concrete, not grass
   const vMat=lam({map:verge,polygonOffset:true,polygonOffsetFactor:2,polygonOffsetUnits:2});
   this.world.add(new THREE.Mesh(ribbon(tr,HALF,HALF+38,-0.06,{uLen:20,outer:reach(1),drop:-2.4}),vMat),new THREE.Mesh(ribbon(tr,-HALF-38,-HALF,-0.06,{uLen:20,outer:reach(-1),drop:-2.4}),vMat));
   // Paved run-off just outside the asphalt edges.
@@ -138,6 +165,9 @@ export class BroadcastEngine{
   const kc=(side:number)=>(i:number)=>Math.abs(curv[i])>1/260&&Math.sign(curv[i])*side>0||Math.abs(curv[i])>1/90?(Math.floor(tr.s[i]/2.2)%2?red:wht):null;
   const kMat=lam({vertexColors:true});
   this.world.add(new THREE.Mesh(ribbon(tr,HALF-0.1,HALF+1.3,0.03,{color:kc(1)}),kMat),new THREE.Mesh(ribbon(tr,-HALF-1.3,-HALF+0.1,0.03,{color:kc(-1)}),kMat));
+  // Street circuits run on public roads: dashed lane lines stay painted on the straights.
+  if(env.street){const dash=(i:number)=>{for(let q=-20;q<=20;q+=5)if(Math.abs(curv[(i+q+n)%n])>1/700)return null;return Math.floor(tr.s[i]/3)%4===0?wht:null};
+   const lm=lam({vertexColors:true});for(const o of [-HALF/3,HALF/3])this.world.add(new THREE.Mesh(ribbon(tr,o-0.08,o+0.08,0.012,{color:dash}),lm))}
   // Start/finish line and gantry.
   const p0=tr.at(0),nx=-Math.sin(p0.h),ny=Math.cos(p0.h);
   const line=new THREE.Mesh(new THREE.PlaneGeometry(1.0,HALF*2),lam({color:0xffffff}));line.rotation.set(-Math.PI/2,0,p0.h);line.position.copy(W(p0.x,p0.y,p0.z+0.02));this.world.add(line);
@@ -156,16 +186,32 @@ export class BroadcastEngine{
   if(pit.length>2)this.world.add(new THREE.Mesh(polyRibbon(pit,5,-0.01),lam({color:0x55585d,polygonOffset:true,polygonOffsetFactor:-1})));
   const nearPit=(x:number,y:number,r:number)=>pit.some(p=>(p.x-x)**2+(p.y-y)**2<r*r);
   // Barriers with posts every 6 m (they give the sense of speed), left out where the pit lane passes.
-  const bar=HALF+17;const barPos:number[]=[];const postM:THREE.Matrix4[]=[];
+  // Street circuits: concrete walls a few metres from the asphalt with catch fences on top; elsewhere wide run-off.
+  const bar=env.street?HALF+4:HALF+17;const barPos:number[]=[];const postM:THREE.Matrix4[]=[];const fence:number[]=[],fenceUv:number[]=[];
   for(const side of [1,-1]){for(let i=0;i<n;i+=1){const j=(i+1)%n;const o=side*bar;
    const ax=tr.x[i]-tr.ty[i]*o,ay=tr.y[i]+tr.tx[i]*o,bx=tr.x[j]-tr.ty[j]*o,by=tr.y[j]+tr.tx[j]*o;
    if(nearPit(ax,ay,16)||nearTrack(ax,ay).d<bar-3)continue;
    const a0=W(ax,ay,tr.z[i]-0.2),a1=W(ax,ay,tr.z[i]+1.1),b0=W(bx,by,tr.z[j]-0.2),b1=W(bx,by,tr.z[j]+1.1);
    for(const p of [a0,b0,b1,a0,b1,a1])barPos.push(p.x,p.y,p.z);
-   if(i%3===0)postM.push(new THREE.Matrix4().makeTranslation(...W(ax-tr.ty[i]*side*1.2,ay+tr.tx[i]*side*1.2,tr.z[i]+2.2).toArray() as [number,number,number]))}}
+   if(env.street){const f0=W(ax,ay,tr.z[i]+1.1),f1=W(ax,ay,tr.z[i]+4.4),g0=W(bx,by,tr.z[j]+1.1),g1=W(bx,by,tr.z[j]+4.4);const u0=tr.s[i]/1.6,u1=u0+tr.length/n/1.6;
+    for(const [p,u,v] of [[f0,u0,0],[g0,u1,0],[g1,u1,1],[f0,u0,0],[g1,u1,1],[f1,u0,1]] as [THREE.Vector3,number,number][]){fence.push(p.x,p.y,p.z);fenceUv.push(u,v)}}
+   if(i%(env.street?2:3)===0){const back=env.street?0.25:1.2;postM.push(new THREE.Matrix4().makeTranslation(...W(ax-tr.ty[i]*side*back,ay+tr.tx[i]*side*back,tr.z[i]+2.2).toArray() as [number,number,number]))}}}
   const bg=new THREE.BufferGeometry();bg.setAttribute('position',new THREE.Float32BufferAttribute(barPos,3));bg.computeVertexNormals();
-  this.world.add(new THREE.Mesh(bg,lam({color:0xc9ced3,side:THREE.DoubleSide})));
+  this.world.add(new THREE.Mesh(bg,lam({color:env.street?0xd8dbde:0xc9ced3,side:THREE.DoubleSide})));
+  if(fence.length){const c=document.createElement('canvas');c.width=c.height=32;const x=c.getContext('2d')!;x.strokeStyle='rgba(40,46,54,.9)';x.lineWidth=2;
+   for(let k=-32;k<64;k+=8){x.beginPath();x.moveTo(k,0);x.lineTo(k+32,32);x.stroke();x.beginPath();x.moveTo(k+32,0);x.lineTo(k,32);x.stroke()}
+   const ft=new THREE.CanvasTexture(c);ft.wrapS=ft.wrapT=THREE.RepeatWrapping;ft.repeat.set(1,6);ft.anisotropy=4;
+   const fg=new THREE.BufferGeometry();fg.setAttribute('position',new THREE.Float32BufferAttribute(fence,3));fg.setAttribute('uv',new THREE.Float32BufferAttribute(fenceUv,2));fg.computeVertexNormals();
+   this.world.add(new THREE.Mesh(fg,new THREE.MeshLambertMaterial({map:ft,transparent:true,alphaTest:0.2,side:THREE.DoubleSide,depthWrite:false})))}
   const posts=new THREE.InstancedMesh(new THREE.BoxGeometry(0.14,4.6,0.14),lam({color:0x3a4048}),postM.length);postM.forEach((m,i)=>posts.setMatrixAt(i,m));this.world.add(posts);
+  // Floodlight poles (street circuits and night races): every ~45 m, alternating sides, lamps reaching over the track.
+  if(env.street||env.night){const poleM:THREE.Matrix4[]=[],lampM:THREE.Matrix4[]=[];const lo=bar+(env.street?1.2:2);
+   for(let i=0,k=0;i<n;i+=22,k++){const side=k%2?1:-1;const ax=tr.x[i]-tr.ty[i]*side*lo,ay=tr.y[i]+tr.tx[i]*side*lo;if(nearPit(ax,ay,12)||nearTrack(ax,ay).d<lo-3)continue;
+    poleM.push(new THREE.Matrix4().makeTranslation(...W(ax,ay,tr.z[i]+6).toArray() as [number,number,number]));
+    const lx=tr.x[i]-tr.ty[i]*side*(lo-2.2),ly=tr.y[i]+tr.tx[i]*side*(lo-2.2);
+    lampM.push(new THREE.Matrix4().compose(W(lx,ly,tr.z[i]+12),new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),Math.atan2(tr.ty[i],tr.tx[i])),new THREE.Vector3(1,1,1)))}
+   const poles=new THREE.InstancedMesh(new THREE.BoxGeometry(0.3,12,0.3),lam({color:0x4a5058}),poleM.length);poleM.forEach((m,i)=>poles.setMatrixAt(i,m));this.world.add(poles);
+   const lamps=new THREE.InstancedMesh(new THREE.BoxGeometry(1.0,0.3,4.6),new THREE.MeshBasicMaterial({color:env.night?0xfff6e0:0xcfd4da}),lampM.length);lampM.forEach((m,i)=>lamps.setMatrixAt(i,m));this.world.add(lamps)}
   // Grandstands along the main straight, on the side away from the pit lane.
   const standSide=pit.length&&pit[Math.floor(pit.length/2)]?(()=>{const p=pit[Math.floor(pit.length/2)];const q=tr.nearest(p.x,p.y);return ((p.x-tr.x[q.i])*-tr.ty[q.i]+(p.y-tr.y[q.i])*tr.tx[q.i])>0?-1:1})():-1;
   const sMat=lam({color:0x4b5463}),seat=lam({color:0x34507a});
@@ -184,13 +230,22 @@ export class BroadcastEngine{
     bd.position.copy(W(p.x-Math.sin(p.h)*o,p.y+Math.cos(p.h)*o,p.z+1.3));bd.rotation.y=p.h+Math.PI/2;this.world.add(bd)})}}
   // Trees and a distant skyline for depth (generic, procedural).
   const r=rng(Math.round(L));const treeM:THREE.Matrix4[]=[],bldM:THREE.Matrix4[]=[];
-  for(let k=0;k<2600&&treeM.length<700;k++){const x=minx-300+r()*(maxx-minx+600),y=miny-300+r()*(maxy-miny+600);const q=nearTrack(x,y);if(q.d<HALF+42||q.d>260||nearPit(x,y,25))continue;
+  for(let k=0;k<2600&&treeM.length<700&&!env.street;k++){const x=minx-300+r()*(maxx-minx+600),y=miny-300+r()*(maxy-miny+600);const q=nearTrack(x,y);if(q.d<HALF+42||q.d>260||nearPit(x,y,25))continue;
    if(this.sites.some(c=>(c.pos.x-x)**2+(c.pos.z+y)**2<110*110))continue;   // keep trackside camera views clear
    const s=0.8+r()*0.9;treeM.push(new THREE.Matrix4().compose(W(x,y,q.z-0.6+5*s),new THREE.Quaternion(),new THREE.Vector3(s,s,s)))}
-  for(let k=0;k<3000&&bldM.length<420;k++){const x=minx-pad+r()*(gw),y=miny-pad+r()*(gh);const q=nearTrack(x,y);if(q.d<420)continue;
+  // Street circuits: hotels and casinos right behind the fences.
+  if(env.street)for(let k=0;k<5000&&bldM.length<480;k++){const x=minx-250+r()*(maxx-minx+500),y=miny-250+r()*(maxy-miny+500);const q=nearTrack(x,y);if(q.d<HALF+38||q.d>360||nearPit(x,y,40))continue;
+   if(this.sites.some(c=>(c.pos.x-x)**2+(c.pos.z+y)**2<70*70))continue;
+   const h=14+r()*r()*150,w=16+r()*34;bldM.push(new THREE.Matrix4().compose(W(x,y,q.low-1+h/2),new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),r()*3),new THREE.Vector3(w,h,w*(.6+r()*.8))))}
+  for(let k=0;k<3000&&bldM.length<(env.street?900:420);k++){const x=minx-pad+r()*(gw),y=miny-pad+r()*(gh);const q=nearTrack(x,y);if(q.d<420)continue;
    const h=12+r()*r()*90,w=18+r()*30;bldM.push(new THREE.Matrix4().compose(W(x,y,zmean-1+h/2),new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),r()*3),new THREE.Vector3(w,h,w*(.6+r()*.8))))}
   const trees=new THREE.InstancedMesh(new THREE.ConeGeometry(3.4,10,7),lam({color:0x2f4a2a}),treeM.length);treeM.forEach((m,i)=>trees.setMatrixAt(i,m));this.world.add(trees);
-  const blds=new THREE.InstancedMesh(new THREE.BoxGeometry(1,1,1),lam({color:0x9aa3ad}),bldM.length);bldM.forEach((m,i)=>blds.setMatrixAt(i,m));this.world.add(blds);
+  // Facades with windows; lit at night (generic, no real buildings or signs).
+  const wc=document.createElement('canvas');wc.width=64;wc.height=128;const wx=wc.getContext('2d')!;const wr=rng(7);
+  wx.fillStyle=env.night?'#161b25':'#9aa3ad';wx.fillRect(0,0,64,128);
+  for(let yy=4;yy<124;yy+=8)for(let xx=4;xx<60;xx+=8){const lit=wr();wx.fillStyle=env.night?(lit<.45?['#ffd9a0','#cfe3ff','#ffc28a','#f6a6ff'][Math.floor(wr()*4)]:'#0d1118'):(lit<.5?'#5d6874':'#7c8792');wx.fillRect(xx,yy,4,5)}
+  const wt=new THREE.CanvasTexture(wc);wt.colorSpace=THREE.SRGBColorSpace;wt.wrapS=wt.wrapT=THREE.RepeatWrapping;wt.repeat.set(1,3);
+  const blds=new THREE.InstancedMesh(new THREE.BoxGeometry(1,1,1),lam(env.night?{map:wt,emissiveMap:wt,emissive:new THREE.Color(0xffffff),emissiveIntensity:0.85}:{map:wt}),bldM.length);bldM.forEach((m,i)=>blds.setMatrixAt(i,m));this.world.add(blds);
  }
 
  /** Fixed trackside camera positions, every ~300 m, on the outside of the bends, raised a few metres. */
@@ -198,9 +253,9 @@ export class BroadcastEngine{
   const out:Site[]=[];const n=tr.n,L=tr.length;const count=Math.max(8,Math.round(L/300));const r=rng(Math.round(L*3));
   for(let k=0;k<count;k++){const d=(k+0.5)*L/count;const i=Math.floor(d/L*n)%n;
    const a=(i-20+n)%n,b=(i+20)%n;let dh=Math.atan2(tr.ty[b],tr.tx[b])-Math.atan2(tr.ty[a],tr.tx[a]);dh=(dh+Math.PI*3)%(Math.PI*2)-Math.PI;
-   let side=Math.abs(dh)>0.12?-Math.sign(dh):(k%2?1:-1);let off=HALF+22+r()*18,pos:THREE.Vector3|null=null;
+   let side=Math.abs(dh)>0.12?-Math.sign(dh):(k%2?1:-1);let off=this.env.street?HALF+7+r()*6:HALF+22+r()*18,pos:THREE.Vector3|null=null;   // street: platforms just behind the wall, above the fence
    for(let t=0;t<4&&!pos;t++){const x=tr.x[i]-tr.ty[i]*side*off,y=tr.y[i]+tr.tx[i]*side*off;const q=tr.nearest(x,y);
-    if(q.dist>=off-4)pos=W(x,y,tr.z[i]+5+r()*8);else if(t===1){side=-side}else off*=0.75}
+    if(q.dist>=off-4)pos=W(x,y,tr.z[i]+(this.env.street?8.5+r()*6:5+r()*8));else if(t===1){side=-side}else off*=0.75}
    if(!pos)pos=W(tr.x[i]-tr.ty[i]*side*(HALF+12),tr.y[i]+tr.tx[i]*side*(HALF+12),tr.z[i]+6);
    out.push({i,d:tr.s[i],pos,name:`CAM ${k+1}`})}
   return out}
@@ -219,7 +274,7 @@ export class BroadcastEngine{
   const t0=D-Math.max(3,2*sp),t1=D+Math.min(600,Math.max(14,10*sp));
   const step=this.info.source==='estimated'?(sp>8?0.5:0.25):0.25;
   const gen=this.gen,ctrl=new AbortController();this.inflight=ctrl;this.lastFetch=now;
-  fetchSamples(t0,t1,this.source,step,ctrl.signal).then(nb=>{
+  fetchSamples(this.samplesBase,t0,t1,this.source,step,ctrl.signal).then(nb=>{
    if(gen!==this.gen||this.disposed)return;
    if(this.info&&nb.key!==this.info.key){this.fetchErr='The position source changed. Reloading the scene…';return}
    // Live data replaces extrapolated samples: blend the difference out instead of jumping (estimated mode).
@@ -238,8 +293,8 @@ export class BroadcastEngine{
   const all=buf?poses(buf,tr,D,this.hints,this.headings,this.correction,now):new Map<string,Pose>();
   // Selected driver: the viewer's pick, else the leader at this instant.
   let sel=this.focus,auto=false;
-  if(!sel||!info.drivers[sel]){auto=true;let best=99;if(buf)for(const num of Object.keys(info.drivers)){const t=buf.timingAt(num,D);if(t?.pos&&t.pos<best&&!t.out){best=t.pos;sel=num}}}
-  for(const [num,car] of this.cars){const p=all.get(num);const t=buf?.timingAt(num,D);
+  if(!sel||!info.drivers[sel]){auto=true;let best=99;if(buf||this.external)for(const num of Object.keys(info.drivers)){const t=this.timingOf(num,D,buf);if(t?.pos&&t.pos<best&&!t.out){best=t.pos;sel=num}}}
+  for(const [num,car] of this.cars){const p=all.get(num);const t=this.timingOf(num,D,buf);
    if(!p||t?.retired&&p.flag==='stale'){car.group.visible=false;continue}
    car.group.visible=true;car.group.position.copy(W(p.x,p.y,p.z));
    const ahead=tr.at(p.d+3),behind=tr.at(p.d-3);car.group.rotation.set(0,p.h,p.offTrack?0:Math.atan2(ahead.z-behind.z,6));
@@ -318,7 +373,7 @@ export class BroadcastEngine{
   const nm=(q:{num:string;m:number}|null)=>q?{code:info.drivers[q.num]?.code||q.num,color:info.drivers[q.num]?.color||'#888',m:q.m}:null;
   let onTrack=0;for(const q of all.values())if(!q.offTrack)onTrack++;
   this.onHud({elapsed:Number.isFinite(D)&&this.feed?.start?D-this.feed.start:null,utc:Number.isFinite(D)?D:null,num:sel,auto,code:m?.code||'',name:m?.name||'',team:m?.team||'',color:m?.color||'#62d7da',
-   timing:sel&&buf?buf.timingAt(sel,D):null,totalLaps:info.total_laps,ahead:nm(nb.ahead),behind:nm(nb.behind),flag:p?p.flag:'none',
+   timing:sel?this.timingOf(sel,D,buf):null,totalLaps:info.total_laps,ahead:nm(nb.ahead),behind:nm(nb.behind),flag:p?p.flag:'none',
    cam:this.mode==='broadcast'&&this.site>=0?this.sites[this.site]?.name||'':'',battle:this.mode==='broadcast'&&this.battle?info.drivers[this.battle]?.code||null:null,
    buffering:!buf,error:this.fetchErr,onTrack,ghosted:this.ghosted});
  }

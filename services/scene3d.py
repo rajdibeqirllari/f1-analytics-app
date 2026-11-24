@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BUNDLED = ROOT / 'frontend' / 'src' / 'hype' / 'circuits'
 STEP_M = 2.0              # centreline spacing
 EXTRAPOLATE_S = 12.0      # beyond the newest crossing a car keeps moving at most this long, then holds (stale)
+LINE_HALF_WIDTH = 5.4    # racing line stays this far from the centreline at most (asphalt is 14 m wide)
 HOLD_GAP_S = 45.0         # crossings further apart than this are not bridged (garage, stopped car)
 SESSION_CODES = {'race': 'R', 'qualifying': 'Q', 'sprint': 'S', 'sprint qualifying': 'SQ', 'sprint shootout': 'SQ',
                  'practice 1': 'FP1', 'practice 2': 'FP2', 'practice 3': 'FP3'}
@@ -74,7 +75,10 @@ class Track:
         self.source = source
         self.pit = pit
         self.pit_frac = pit_frac
-        self.profile = speed_profile(x, y)   # cumulative profile-time fraction at each point (0..1)
+        # A typical racing line (same for every car): wide on entry, clipping the apex, wide on exit.
+        self.line = racing_line(x, y, LINE_HALF_WIDTH)
+        tx, ty = _tangents(x, y)
+        self.profile = speed_profile(x - ty * self.line, y + tx * self.line)   # cumulative profile-time fraction (0..1)
 
     def at(self, d: np.ndarray | float):
         """x, y, z at lap distance d (metres, any value; wraps)."""
@@ -94,7 +98,7 @@ class Track:
         r = lambda a: np.round(a, 2).tolist()
         # Ship every second point (~4 m); the browser smooths it again.
         return dict(x=r(self.x[::2]), y=r(self.y[::2]), z=r(self.z[::2]), length=round(self.length, 1),
-                    source=self.source, pit=self.pit, pit_frac=self.pit_frac,
+                    source=self.source, pit=self.pit, pit_frac=self.pit_frac, line=np.round(self.line[::2], 2).tolist(),
                     speed=np.round(self._speeds()[::2], 1).tolist())
 
     def _speeds(self) -> np.ndarray:
@@ -103,6 +107,31 @@ class Track:
         with np.errstate(divide='ignore', invalid='ignore'):
             v = np.where(dt > 0, ds / np.maximum(dt, 1e-9), 0)
         return v / max(1e-9, v.max())   # relative speed 0..1 (braking zones, camera placement)
+
+
+def _tangents(x: np.ndarray, y: np.ndarray):
+    dx, dy = np.roll(x, -3) - np.roll(x, 3), np.roll(y, -3) - np.roll(y, 3)
+    length = np.hypot(dx, dy)
+    length[length == 0] = 1
+    return dx / length, dy / length
+
+
+def racing_line(x: np.ndarray, y: np.ndarray, half: float) -> np.ndarray:
+    """Lateral offset (m, left positive) of a smooth line through the corridor of +-half around the centreline.
+
+    Minimises the line's curvature (fourth differences over a 16 m stencil) while keeping it inside the track:
+    the classic outside-apex-outside path, swinging wide before a bend, clipping the apex, running out on exit."""
+    tx, ty = _tangents(x, y)
+    nx, ny = -ty, tx
+    off = np.zeros(len(x))
+    k = max(1, int(round(16 / max(.5, float(np.mean(np.hypot(np.diff(x), np.diff(y))))))))
+    r = lambda a, s: np.roll(a, s)
+    for _ in range(4000):
+        px, py = x + nx * off, y + ny * off
+        d4x = r(px, 2 * k) - 4 * r(px, k) + 6 * px - 4 * r(px, -k) + r(px, -2 * k)
+        d4y = r(py, 2 * k) - 4 * r(py, k) + 6 * py - 4 * r(py, -k) + r(py, -2 * k)
+        off = np.clip((px - 0.1 * d4x - x) * nx + (py - 0.1 * d4y - y) * ny, -half, half)
+    return _smooth_closed(off, 5)
 
 
 def speed_profile(x: np.ndarray, y: np.ndarray) -> np.ndarray:
