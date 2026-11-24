@@ -26,7 +26,7 @@ export default function HypeApp(){
  return <div className="rhx">
   <header className="rhx-top">
    <Link to={{pathname:'/hype',search}} className="rhx-brand" aria-label="Race Hype, pick a weekend"><img src={rhLogo} alt=""/><span>RACE HYPE</span></Link>
-   <nav className="rhx-nav" aria-label="Pages">{NAV.map(([path,label,Icon])=><NavLink key={path} end to={{pathname:'/hype'+path,search}} className={({isActive})=>isActive?'on':''}>
+   <nav className="rhx-nav" aria-label="Pages">{NAV.map(([path,label,Icon])=><NavLink key={path} end to={{pathname:'/hype'+path,search}} aria-label={label} className={({isActive})=>isActive?'on':''}>
     <Icon aria-hidden="true"/><span>{label}</span></NavLink>)}</nav>
    <Link className="rhx-classic" to={{pathname:here[3],search}}>Classic workspace</Link>
   </header>
@@ -46,6 +46,6 @@ export default function HypeApp(){
     <Route path="*" element={<Picker/>}/>
    </Routes>
   </Suspense>
-  <footer className="rhx-foot"><span>Chase the detail.</span><span>{sub==='/live'?'@theracehype · Timing from F1 live timing; map positions are estimated.':'@theracehype · Historical session data, not a live feed.'}</span></footer>
+  <footer className="rhx-foot"><span>Chase the detail.</span><span>{sub==='/live'?'@theracehype · Unofficial fan project, not affiliated with Formula 1. Public timing data; map positions are estimated; AI commentary.':'@theracehype · Historical session data, not a live feed.'}</span></footer>
  </div>;
 }

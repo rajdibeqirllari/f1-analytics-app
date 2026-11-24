@@ -1,0 +1,53 @@
+/* 3D Broadcast (Live page). Scoped under .rhx like the rest of the redesign. */
+.rhx .rhx-b3d{display:flex;flex-direction:column;gap:10px;margin:0 0 18px}
+.rhx .rhx-b3d-stage{position:relative;aspect-ratio:16/9;max-height:74vh;width:100%;border-radius:8px;overflow:hidden;background:#070b0f;box-shadow:inset 0 0 0 1px var(--rhx-line)}
+.rhx .rhx-b3d-stage.is-off{aspect-ratio:auto;max-height:none;overflow:visible;background:none;box-shadow:none}
+.rhx .rhx-b3d-canvas{position:absolute;inset:0}
+.rhx .rhx-b3d-stage.is-off .rhx-b3d-canvas{display:none}
+.rhx .rhx-b3d-canvas canvas{display:block;width:100%!important;height:100%!important}
+.rhx .rhx-b3d-fallback{display:flex;flex-direction:column;gap:10px}
+.rhx .rhx-b3d-fallback .rhx-livemap{max-height:60vh}
+
+.rhx .rhx-b3d-card{position:absolute;left:14px;top:14px;min-width:250px;max-width:min(380px,60%);background:rgba(8,12,16,.84);backdrop-filter:blur(6px);
+ border-left:5px solid var(--team);border-radius:4px;padding:10px 12px;color:var(--rhx-ink);font-family:var(--rhx-text);pointer-events:none}
+.rhx .rhx-b3d-who{display:flex;align-items:center;gap:10px}
+.rhx .rhx-b3d-who b{font-family:var(--rhx-display);font-weight:800;line-height:1}
+.rhx .rhx-b3d-who .pos{font-size:30px;color:var(--rhx-ink);min-width:44px}
+.rhx .rhx-b3d-who .code{font-size:30px;letter-spacing:.02em}
+.rhx .rhx-b3d-who span{display:flex;flex-direction:column;font-size:13px;font-weight:600;line-height:1.2}
+.rhx .rhx-b3d-who small{color:var(--rhx-muted);font-weight:500}
+.rhx .rhx-b3d-card dl{display:flex;gap:18px;margin:8px 0 0}
+.rhx .rhx-b3d-card dt{font-size:11px;color:var(--rhx-muted);text-transform:none}
+.rhx .rhx-b3d-card dd{margin:0;font-family:var(--rhx-display);font-weight:700;font-size:20px;font-variant-numeric:tabular-nums}
+.rhx .rhx-b3d-near{display:flex;flex-direction:column;gap:2px;margin:8px 0 0;font-size:13px;color:#c9d3dc}
+.rhx .rhx-b3d-near i{display:inline-block;width:4px;height:11px;margin-right:6px;vertical-align:-1px}
+.rhx .rhx-b3d-warn{margin:6px 0 0;font-size:12px;color:#ffd23f}
+.rhx .rhx-b3d-warn.is-bad{color:#ff8a80}
+
+.rhx .rhx-b3d-source{position:absolute;right:14px;top:14px;display:flex;flex-direction:column;align-items:flex-end;gap:1px;text-align:right;
+ background:rgba(8,12,16,.78);border-radius:4px;padding:8px 10px;color:var(--rhx-ink);pointer-events:none;max-width:48%}
+.rhx .rhx-b3d-source b{font-family:var(--rhx-display);font-weight:800;font-size:17px;letter-spacing:.02em}
+.rhx .rhx-b3d-source.is-recorded b{color:#7ee2a8}
+.rhx .rhx-b3d-source.is-estimated b{color:#ffd23f}
+.rhx .rhx-b3d-source small{font-size:12px;color:#c9d3dc}
+.rhx .rhx-b3d-source .clock{font-variant-numeric:tabular-nums;color:var(--rhx-muted)}
+.rhx .rhx-b3d-camtag{position:absolute;left:14px;bottom:34px;background:rgba(8,12,16,.78);border-radius:3px;padding:4px 8px;font-family:var(--rhx-display);font-weight:700;
+ font-size:14px;color:var(--rhx-ink);pointer-events:none}
+.rhx .rhx-b3d-status{position:absolute;left:50%;bottom:40px;transform:translateX(-50%);margin:0;background:rgba(8,12,16,.86);border-radius:4px;padding:8px 12px;
+ color:var(--rhx-ink);font-size:14px;max-width:80%;text-align:center}
+.rhx .rhx-b3d-legal{position:absolute;right:12px;bottom:8px;margin:0;font-size:11px;color:rgba(238,242,245,.75);text-shadow:0 1px 2px #000;pointer-events:none}
+
+.rhx .rhx-b3d-bar{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px}
+.rhx .rhx-b3d-pick{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--rhx-muted)}
+.rhx .rhx-b3d-pick select{background:var(--rhx-raised);color:var(--rhx-ink);border:1px solid var(--rhx-line);border-radius:4px;padding:7px 8px;font:inherit}
+.rhx .rhx-b3d-detail{flex:1 1 320px;color:var(--rhx-muted);font-size:12px;line-height:1.35}
+.rhx .rhx-b3d-bar .rhx-seg button{white-space:nowrap}
+@media (max-width:720px){
+ .rhx .rhx-b3d-stage{aspect-ratio:4/3}
+ .rhx .rhx-b3d-card{min-width:0;max-width:62%;padding:7px 9px}
+ .rhx .rhx-b3d-who .pos,.rhx .rhx-b3d-who .code{font-size:22px}
+ .rhx .rhx-b3d-who span,.rhx .rhx-b3d-near{display:none}
+ .rhx .rhx-b3d-card dd{font-size:16px}
+ .rhx .rhx-b3d-source{max-width:36%}
+ .rhx .rhx-b3d-source small{display:none}
+}

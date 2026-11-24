@@ -163,8 +163,17 @@ def load_openf1_lap(
     driver_code: str,
     lap_mode: str,
     lap_number: int | None,
+    qualifying_part: str = "All",
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any], dict[str, Any]]:
     from services.openf1_comparison import historical
+    # A lap picked by its number is the same lap whatever the segment; only "fastest in Q2" needs the boundaries.
+    if qualifying_part not in (None, "", "All") and str(session_code).upper() in ("Q", "SQ") and lap_mode == "Fastest":
+        # OpenF1 has no certified Q1/Q2/Q3 boundaries. Returning the whole-session fastest lap under a "Q1" label
+        # would be the wrong lap, so say so instead.
+        raise RuntimeError(
+            f"OpenF1 cannot split qualifying into Q1/Q2/Q3, so it cannot give you a {qualifying_part} lap. "
+            "Choose 'All of qualifying' (or pick the lap by its number), or use FastF1 for a cached session."
+        )
     session = find_openf1_session(year, event_search, session_code)
     session_key = int(session["session_key"])
     driver_number = get_openf1_driver_number(session_key, driver_code)

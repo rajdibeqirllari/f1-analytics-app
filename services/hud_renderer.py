@@ -57,16 +57,9 @@ class HUDExportResult:
 
 
 def _first_column(frame: pd.DataFrame, *names: str) -> str | None:
-    lookup = {str(column).lower(): column for column in frame.columns}
-    for name in names:
-        if name.lower() in lookup:
-            return lookup[name.lower()]
-    for name in names:
-        wanted = name.lower()
-        for lowered, column in lookup.items():
-            if wanted in lowered:
-                return column
-    return None
+    # Shared with the telemetry export: exact names first, then whole words (never "t" inside "Throttle").
+    from services.export_service import _first_column as shared
+    return shared(frame, *names)
 
 
 def _time_to_seconds(series: pd.Series) -> pd.Series:
@@ -132,10 +125,11 @@ def normalize_hud_telemetry(frame: pd.DataFrame, source: str = "Telemetry") -> p
         raise ValueError("The selected source returned no telemetry rows.")
 
     data = frame.copy()
-    time_col = _first_column(data, "t", "time_sec", "Time", "SessionTime", "session_time", "Date")
+    time_col = _first_column(data, "t", "time_sec", "Time", "SessionTime", "session_time", "timestamp", "elapsed", "seconds", "Date")
     speed_col = _first_column(data, "speed_kmh", "Speed", "speed")
     if time_col is None or speed_col is None:
-        raise ValueError("HUD telemetry needs at least a time column and a speed column.")
+        raise ValueError("HUD telemetry needs a time column (time_sec, t, Time, SessionTime, timestamp or Date) and a speed column "
+                         f"(Speed or speed_kmh). Columns in this file: {', '.join(str(c) for c in data.columns)}.")
 
     def numeric(*names: str, default: float = 0.0) -> pd.Series:
         column = _first_column(data, *names)
@@ -147,7 +141,7 @@ def normalize_hud_telemetry(frame: pd.DataFrame, source: str = "Telemetry") -> p
     throttle = numeric("throttle", "throttle_pct", "Throttle", default=0).clip(0, 100)
     brake_col = _first_column(data, "brake", "brake_active", "Brake")
     brake = _brake_percent(data[brake_col]) if brake_col else pd.Series([0.0] * len(data), index=data.index)
-    drs_col = _first_column(data, "drs", "drs_active", "drs_raw", "DRS")
+    drs_col = _first_column(data, "drs_active", "drs", "drs_raw", "DRS")   # the open/closed flag wins over the raw code
     drs = data[drs_col].map(_drs_active) if drs_col else pd.Series([False] * len(data), index=data.index)
 
     normalized = pd.DataFrame(

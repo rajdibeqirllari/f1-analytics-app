@@ -417,7 +417,8 @@ class VideoJobs:
             self._update(job,status="building",message="Loading and synchronizing the selected laps")
             comparison=comparison or build_comparison(selection)
             self._update(job,comparison=comparison,status="rendering",message="Preparing the 3D scene" if job.style=="3D" else
-                         ("Rendering the full lap preview" if preview else "Rendering the export"))
+                         (("Rendering the clip preview" if getattr(job,'end',None) is not None else "Rendering the full lap preview")
+                          if preview else "Rendering the export"))
             label=("night_" if camera in ('Night chase A','Night chase B') else "3d_") if job.style=="3D" else ""
             path=OUTPUT/f"{selection.year}_{selection.driver_a}_{selection.driver_b}_{label}{job.id[:12]}_{'preview' if preview else 'export'}.mp4"
             from services.recorded_music import music_info

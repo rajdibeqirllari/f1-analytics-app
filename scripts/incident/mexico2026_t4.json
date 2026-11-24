@@ -1,0 +1,237 @@
+{
+  "title": "Mexico City GP 2026 · Lap 1 · Turn 4",
+  "data_dir": "outputs/incident",
+  "race_start_utc": "2026-11-01T20:03:25.717+00:00",
+  "lap_reference": "44",
+  "track_half_width": 7.5,
+  "drivers": {
+    "44": {
+      "code": "HAM",
+      "name": "Hamilton",
+      "grid": 1,
+      "tag": "#FFD23F",
+      "tcam": "#FFD23F",
+      "helmet": "#FFD23F",
+      "trail": "#FFD23F"
+    },
+    "16": {
+      "code": "LEC",
+      "name": "Leclerc",
+      "grid": 3,
+      "tag": "#FF3355",
+      "tcam": "#111111",
+      "helmet": "#F4F4F4",
+      "trail": "#FF2D4F"
+    }
+  },
+  "livery": {
+    "body": "#B8000F",
+    "accent": "#F2F2F2",
+    "carbon": "#111216",
+    "number": "#FFFFFF"
+  },
+  "_lateral_help": "Metres from the recorded line, + is to the driver's right. Keyed by distance along the lap (metres from HAM's grid slot). Corners: T1 984 R, T2 1062 L, T3 1116 R, T4 1820 L, T5 1884 R, T6 2026 R. The timing data puts both cars on one line, so who was inside/outside comes from race reports, not GPS.",
+  "lateral": {
+    "44": [
+      [0, 0],
+      [860, 0],
+      [930, 1.2],
+      [984, 0.3],
+      [1040, 1.0],
+      [1062, 3.0],
+      [1110, 0.8],
+      [1160, 0],
+      [1640, 0],
+      [1700, -0.6],
+      [1790, -1.8],
+      [1820, -3.0],
+      [1845, -2.6],
+      [1870, -4.2],
+      [1884, -5.0],
+      [1905, -2.5],
+      [1935, 0],
+      [5000, 0]
+    ],
+    "16": [
+      [0, 0],
+      [700, 0],
+      [820, -4.0],
+      [930, -4.5],
+      [984, -5.0],
+      [1030, -3.0],
+      [1062, -2.2],
+      [1100, -3.2],
+      [1150, -3.6],
+      [1230, -1.0],
+      [1270, 0],
+      [1540, 0],
+      [1640, 3.0],
+      [1720, 3.6],
+      [1790, 4.2],
+      [1820, 4.6],
+      [1850, 5.6],
+      [1866, 8.0],
+      [1884, 11.0],
+      [1900, 7.5],
+      [1918, 2.5],
+      [1940, 0],
+      [5000, 0]
+    ]
+  },
+  "cut": {
+    "car": "16",
+    "s_from": 1858,
+    "s_to": 1922,
+    "label": "Across the inside of Turn 5"
+  },
+  "off_track": [
+    {"car": "44", "s_from": 1806, "s_to": 1836, "label": "Off on the inside of Turn 4"},
+    {"car": "16", "s_from": 1858, "s_to": 1922, "label": "Off track at Turn 5"}
+  ],
+  "corners": {
+    "T1": 984,
+    "T2": 1062,
+    "T3": 1116,
+    "T4": 1820,
+    "T5": 1884,
+    "T6": 2026
+  },
+  "render": {
+    "size": [1080, 1920],
+    "fps": 30,
+    "samples": 48,
+    "engine": "BLENDER_EEVEE_NEXT"
+  },
+  "shots": [
+    {
+      "id": "intro",
+      "camera": "drone",
+      "t": [0.0, 4.5],
+      "speed": 1.0,
+      "height": 60,
+      "lens": 32,
+      "captions": [
+        {"at": 0.2, "dur": 4.2, "kind": "title", "kicker": "Mexico City GP 2026 · Lap 1", "title": "Ferrari 1-2… for 30 seconds", "text": "HAM from pole, LEC from P3. Who was at fault at Turn 4?"}
+      ],
+      "height_end": 34,
+      "tilt": 28,
+      "lead": 10,
+      "trail": 0
+    },
+    {
+      "id": "t1",
+      "camera": "drone",
+      "t": [11.0, 21.5],
+      "speed": 1.0,
+      "height": 34,
+      "lens": 35,
+      "captions": [
+        {"at_t": 14.2, "dur": 3.2, "title": "Turn 1", "text": "LEC brakes {t1_brake_gap:.2f} s later than HAM and goes round the outside"},
+        {"at_t": 18.6, "dur": 2.8, "title": "Turn 2", "text": "Over the kerb on the inside — HAM keeps the lead"}
+      ],
+      "tilt": 14,
+      "lead": 6,
+      "trail": 3.5
+    },
+    {
+      "id": "run_t4",
+      "camera": "chase",
+      "t": [24.0, 31.0],
+      "speed": 1.0,
+      "height": 2.6,
+      "back": 22,
+      "side": -3.5,
+      "lens": 30,
+      "captions": [
+        {"at_t": 24.4, "dur": 3.2, "title": "Slipstream", "text": "Gap {gap_t3:.1f} m after Turn 3 — {gap_t4:.1f} m at the braking point"},
+        {"at_t": 28.2, "dur": 2.8, "title": "Top speed", "text": "LEC {lec_vmax} km/h · HAM {ham_vmax} km/h"}
+      ],
+      "trail": 0
+    },
+    {
+      "id": "t4_slowmo",
+      "camera": "drone",
+      "t": [30.6, 36.2],
+      "speed": 0.45,
+      "height": 26,
+      "lens": 35,
+      "captions": [
+        {"at_t": 31.0, "dur": 2.2, "title": "Braking", "text": "HAM brakes first at {ham_t4_brake_speed} km/h"},
+        {"at_t": 31.6, "dur": 2.6, "title": "", "text": "LEC brakes {t4_brake_gap:.2f} s later, round the outside"},
+        {"at_t": 33.3, "dur": 3.0, "title": "Stewards", "text": "Both too fast — neither makes Turn 4 on track"}
+      ],
+      "tilt": 10,
+      "lead": 4,
+      "trail": 4.0
+    },
+    {
+      "id": "tactical",
+      "camera": "top",
+      "t": [30.8, 41.5],
+      "speed": 0.8,
+      "trails": true,
+      "limits": true,
+      "captions": [
+        {"at_t": 33.8, "dur": 2.8, "title": "HAM", "text": "Off on the inside of Turn 4 to make the corner", "car": "44"},
+        {"at_t": 36.4, "dur": 3.4, "title": "LEC", "text": "Not entitled to the corner — cuts across Turn 5", "car": "16"},
+        {"at_t": 39.6, "dur": 2.4, "title": "Result", "text": "LEC rejoins {gap_after:.1f} s ahead, in the lead"}
+      ],
+      "trail": 12.0
+    },
+    {
+      "id": "freeze",
+      "camera": "orbit",
+      "t": [36.6, 36.6],
+      "hold": 4.0,
+      "radius": 30,
+      "height": 11,
+      "orbit_deg": [120, 200],
+      "lens": 40,
+      "limits": true,
+      "captions": [
+        {"at": 0.3, "dur": 3.6, "title": "Freeze", "text": "All four wheels off track — that's where the lead was gained", "car": "16"}
+      ],
+      "trail": 4.0
+    },
+    {
+      "id": "exit",
+      "camera": "drone",
+      "t": [36.7, 44.5],
+      "speed": 1.0,
+      "height": 50,
+      "lens": 32,
+      "captions": [
+        {"at_t": 38.5, "dur": 3.0, "title": "Turn 6", "text": "LEC leads. HAM loses momentum and is passed by VER later"}
+      ],
+      "tilt": 18,
+      "lead": 0,
+      "trail": 5.0
+    },
+    {
+      "id": "verdict",
+      "camera": "heli",
+      "t": [44.5, 44.5],
+      "hold": 7.0,
+      "height": 60,
+      "back": 90,
+      "side": 40,
+      "lens": 30,
+      "pull_back": 40,
+      "captions": [
+        {"at": 0.2, "dur": 6.8, "kind": "verdict"}
+      ]
+    }
+  ],
+  "verdict": {
+    "kicker": "FIA Stewards",
+    "title": "5-second penalty for LEC",
+    "lines": ["Left the track and gained an advantage", "Reduced from 10 s: both went in too fast, HAM also left the track"],
+    "quotes": [
+      ["HAM", "“Do or die. Either I win or none of us do.”"],
+      ["LEC", "“There was a gap and when you are fighting for a win, I will always go for it.”"]
+    ],
+    "result": "Result: VER wins · HAM P2 · LEC P4",
+    "cta": "Your call: comment 44 or 16"
+  },
+  "credits": "3D reconstruction from public timing data (OpenF1). Side-by-side positions are approximate, based on race reports. Not affiliated with Formula 1 or Scuderia Ferrari. Car model: Qvist_designs, CC BY 4.0."
+}

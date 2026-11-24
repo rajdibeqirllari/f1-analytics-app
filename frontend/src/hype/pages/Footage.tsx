@@ -75,7 +75,8 @@ export function FootageStudio({hudWidth,position,x,y,onMove,source,hudControls}:
  const [lapInClip,setLapInClip]=useState<number|null>(null);
  const result:Sync|null=sync.result;
  useEffect(()=>{if(result)setLapInClip(result.lap_start_in_clip)},[result]);
- useEffect(()=>{sync.reset();setLapInClip(null)},[clip?.id,s.year,s.event,s.session,s.driver,s.lap,source]);
+ // Any change to which telemetry is used (including the Q1/Q2/Q3 segment, which changes the "fastest" lap) drops the sync.
+ useEffect(()=>{sync.reset();setLapInClip(null)},[clip?.id,s.year,s.event,s.session,s.driver,s.lap,s.qualifying_part,source]);
  const choose=async(file?:File)=>{if(!file)return;setErr('');setPct(0);
   try{const c=await upload(file,setPct);setClip(c);render.reset()}catch(e){setErr((e as Error).message)}finally{setPct(null)}};
  const nudge=(d:number)=>setLapInClip(v=>v==null?v:Math.round((v+d)*1000)/1000);
@@ -102,7 +103,8 @@ export function FootageStudio({hudWidth,position,x,y,onMove,source,hudControls}:
      <div className="rhx-syncbadge"><b>{lvl[0]}</b><small>{lvl[1]}</small><small>{result.shifts.matched} of {result.shifts.in_data} gear changes matched{result.shifts.spread_ms!=null?`, within ±${result.shifts.spread_ms} ms`:''}.</small></div>
     </div>}
     {result&&clip&&lapInClip!=null&&<SyncChart sync={result} lapInClip={lapInClip} duration={clip.duration}/>}
-    {(result||(clip&&!clip.has_audio))&&<div className="rhx-nudge">
+    {clip.has_audio&&!result&&!sync.busy&&<Note>No luck with the sound, or want to skip it? Set where the lap starts by hand below.</Note>}
+    {!sync.busy&&<div className="rhx-nudge">
      <NumberField label="Lap start in your clip" suffix="s" step={.01} value={lapInClip??0} onChange={v=>setLapInClip(v)}/>
      <div className="rhx-nudge-btns" role="group" aria-label="Nudge the lap start">{[-.1,-.01,.01,.1].map(d=><button type="button" key={d} onClick={()=>{if(lapInClip==null)setLapInClip(0);nudge(d)}}>{d>0?'+':'−'}{Math.abs(d)} s</button>)}
       {result&&<button type="button" className="is-reset" onClick={()=>setLapInClip(result.lap_start_in_clip)}>Back to automatic</button>}</div>
@@ -117,7 +119,7 @@ export function FootageStudio({hudWidth,position,x,y,onMove,source,hudControls}:
      backdrop={render.result?undefined:clip.poster} video={render.result?.file.url}/>
     :<div className="rhx-screen-idle is-static"><span className="rhx-screen-duel"><b>{s.driver||'—'}</b></span><span>Your clip appears here with the HUD on top</span></div>}
    <JobBar task={render}/>
-   <Action disabled={!ready||render.busy||sync.busy} sub={ready?`HUD synced at ${mmss(lapInClip!)}, original sound kept`:clip?'Find the lap first':'Upload a clip first'}
+   <Action disabled={!ready||render.busy||sync.busy} sub={ready?`HUD synced at ${mmss(lapInClip!)}, original sound kept`:clip?(clip.has_audio?'Find the lap, or set the start by hand':'Set where the lap starts first'):'Upload a clip first'}
     onClick={()=>clip&&lapInClip!=null&&render.start('footage_render',s,{footage_id:clip.id,lap_start_in_clip:lapInClip,hud_width:hudWidth,position,x,y,source})}>Render video</Action>
    {render.result&&<div className="rhx-result"><FileButton file={render.result.file} label="Download the finished video"/>
     <Note>{render.result.frames.toLocaleString()} frames. HUD from {render.result.source}{render.result.lap_number?`, lap ${render.result.lap_number}`:''}. It shows real data wherever the clip has telemetry, including before and after the lap.</Note>

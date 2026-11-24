@@ -52,6 +52,37 @@ def _safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "_", str(value)).strip("_")
 
 
+def _laps_by_time(rows: list[dict[str, Any]], year: int, session_code: str, race: str) -> None:
+    """Fill in each clip's lap from when it aired, using OpenF1 lap start times (cached, free).
+
+    The archive gives most clips no lap. A clip belongs to the driver's last lap that started before it aired;
+    clips from before the first lap are pre-race. Best effort: without OpenF1 data the laps stay unknown."""
+    if not any(r.get("lap") is None and r.get("date") for r in rows):
+        return
+    try:
+        import pandas as pd
+        from services.openf1_comparison import historical, resolve
+        key = int(resolve(year, race, session_code)["session_key"])
+        laps = pd.DataFrame(historical("laps", {"session_key": key}))
+        laps["start"] = pd.to_datetime(laps["date_start"], utc=True, format="ISO8601", errors="coerce")
+        laps = laps.dropna(subset=["start"])
+    except Exception:
+        return
+    for r in rows:
+        if r.get("lap") is not None or not r.get("date") or r.get("driver_number") is None:
+            continue
+        aired = pd.to_datetime(r["date"], utc=True, errors="coerce")
+        mine = laps[laps.driver_number == int(r["driver_number"])].sort_values("start")
+        if pd.isna(aired) or mine.empty:
+            continue
+        before = mine[mine.start <= aired]
+        if before.empty:
+            r["pre"] = True
+        else:
+            r["lap"] = int(before.iloc[-1].lap_number)
+            r["pre"] = False
+
+
 def load_radio_session(
     year: int,
     race: str,
@@ -90,7 +121,10 @@ def load_radio_session(
                 "driver_name": clip.driver_name,
                 "team": clip.team,
                 "time": clip.time,
-                "lap": clip.lap,
+                "date": getattr(clip, "date", None),
+                # The archive gives clips from before the start a session time of 00:00:00 and no lap.
+                "lap": clip.lap if clip.lap is not None else clip.context.lap_number,
+                "pre": clip.lap is None and clip.context.lap_number is None and str(clip.time or '') in ('', '00:00:00'),
                 "recording_url": clip.recording_url,
                 "local_path": clip.local_path,
                 "position": clip.context.position,
@@ -99,6 +133,7 @@ def load_radio_session(
                 "last_lap": clip.context.last_lap_time,
             }
         )
+    _laps_by_time(rows, year, session_code, resolved)
     return {
         "year": session.year,
         "requested_race": requested,

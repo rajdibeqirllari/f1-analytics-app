@@ -10,7 +10,7 @@ import pandas as pd
 from fastapi import FastAPI,HTTPException,Request,UploadFile,File
 from fastapi.responses import FileResponse,HTMLResponse,JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel,Field
+from pydantic import BaseModel,Field,model_validator
 
 from api import engines
 from api.files import ROOT,library,resolve,descriptor,approved
@@ -48,6 +48,12 @@ class Selection(BaseModel):
     lap_b:int|None=Field(default=None,ge=1,le=500)
     qualifying_part:str=Field(default='All',pattern=r'^(All|Q1|Q2|Q3)$')
 
+    @model_validator(mode='after')
+    def _segment_only_in_qualifying(self):
+        # Q1/Q2/Q3 means nothing outside qualifying; a leftover value must not filter a race or practice.
+        if self.session not in ('Q','SQ'): self.qualifying_part='All'
+        return self
+
 
 class Task(BaseModel):
     kind:str
@@ -58,10 +64,23 @@ class Task(BaseModel):
 @app.middleware('http')
 async def local_origin(request:Request,call_next):
     if request.method not in ('GET','HEAD','OPTIONS'):
-        origin=request.headers.get('origin')
-        if origin and urlparse(origin).netloc not in ('localhost:8000','127.0.0.1:8000','localhost:5173','127.0.0.1:5173'):
+        if not origin_allowed(request.headers.get('origin'),request.headers.get('host')):
             return JSONResponse({'detail':'This local app accepts changes from its own interface only.'},status_code=403)
     return await call_next(request)
+
+
+LOCAL_HOSTS={'localhost','127.0.0.1','::1'}
+
+
+def origin_allowed(origin,host):
+    """Changes are accepted from the app's own pages only: the Origin must be the address this engine was reached
+    on (any port, so a second engine on 8001 works), or the Vite dev server on this machine. Foreign sites are refused."""
+    if not origin: return True   # not a browser cross-site request (curl, same-origin navigation)
+    parsed=urlparse(origin)
+    if parsed.scheme not in ('http','https') or not parsed.hostname: return False
+    if host and parsed.netloc.lower()==host.strip().lower(): return True
+    target=urlparse('//'+(host or '')).hostname
+    return parsed.hostname in LOCAL_HOSTS and target in LOCAL_HOSTS and parsed.port==5173
 
 
 @app.exception_handler(ValueError)
@@ -143,8 +162,10 @@ def submit(task:Task):
         if task.kind=='footage_sync': return footage.sync(s,o,progress)
         if task.kind=='footage_render': return footage.render(s,o,progress)
         if task.kind=='replay':
-            payload=build_replay_payload(s.year,s.event,s.session,int(o.get('sample_rate',3)),
-                       refresh=bool(o.get('refresh',False)),progress_callback=progress)
+            from services.replay_fallback import replay_with_fallback
+            payload=replay_with_fallback(s.year,s.event,s.session,int(o.get('sample_rate',3)),
+                       refresh=bool(o.get('refresh',False)),progress_callback=progress,
+                       recordings=[ROOT/'outputs'/'live',ROOT/'tmp'])
             token=uuid4().hex;replays[token]=payload
             return {'viewer':f'/api/replays/{token}/viewer','data':f'/api/replays/{token}/data','meta':{k:v for k,v in payload['meta'].items() if k!='cache_file'},
                     'technical':payload['technical']}
@@ -257,7 +278,10 @@ def radio_audio(key:str,index:int,download:bool=False):
     if not result or not 0<=index<len(result['clips']): raise HTTPException(404,'Radio clip not found.')
     clip=result['clips'][index]
     local=Path(str(clip.get('local_path') or ''))
-    if local.is_file() and approved(local): return FileResponse(local,filename=local.name if download else None)
+    radio_root=(ROOT/'outputs'/'radio').resolve()
+    # The radio archive cache is private to the Library, but this page's own player may stream from it.
+    if local.is_file() and local.resolve().is_relative_to(radio_root) and local.suffix.lower()=='.mp3':
+        return FileResponse(local,media_type='audio/mpeg',filename=local.name if download else None)
     url=clip.get('recording_url','')
     host=urlparse(url).hostname or ''
     if urlparse(url).scheme!='https' or not host.endswith('.formula1.com'):

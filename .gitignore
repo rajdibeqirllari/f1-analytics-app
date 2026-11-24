@@ -249,3 +249,6 @@ profile.json
 
 # Separate git repository (not part of this app)
 sites/taksa-ime/
+
+# Kokoro TTS model files (large)
+assets/tts/

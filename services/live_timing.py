@@ -26,7 +26,9 @@ from pathlib import Path
 from typing import Any
 
 TOPICS_KEPT = {'DriverList', 'TimingData', 'TimingAppData', 'TimingStats', 'SessionInfo', 'SessionStatus',
-               'TrackStatus', 'RaceControlMessages', 'ExtrapolatedClock', 'LapCount', 'WeatherData', 'SessionData'}
+               'TrackStatus', 'RaceControlMessages', 'ExtrapolatedClock', 'LapCount', 'WeatherData', 'SessionData',
+               'TeamRadio'}
+GROWING_AFTER = 15.0   # seconds since the last write for a file to count as "still recording"
 TRACK_STATUS = {'1': ('green', 'Track clear'), '2': ('yellow', 'Yellow flag'), '3': ('yellow', 'Flag'),
                 '4': ('sc', 'Safety car'), '5': ('red', 'Red flag'), '6': ('vsc', 'Virtual safety car'),
                 '7': ('vsc', 'VSC ending')}
@@ -208,6 +210,7 @@ class LiveState:
                 speed_trap=_float(((stats.get(num) or {}).get('BestSpeeds') or {}).get('ST', {}).get('Value')),
             ))
         rows.sort(key=lambda r: r['position'])
+        mark_fastest(rows, qualifying)
         for r in rows:
             r['progress'] = self._progress(r, total_segments, seg_counts, now)
         status = (t.get('TrackStatus') or {})
@@ -256,6 +259,25 @@ class LiveState:
         if now - ts > per_seg * 6:
             ahead = 0
         return ((idx + ahead) / total) % 1.0
+
+
+def mark_fastest(rows: list[dict], qualifying: bool = False) -> None:
+    """Flag the best lap of the whole field (``row['fastest']``), not the leader's.
+
+    In a race the leader rarely holds the fastest lap. Blank or unreadable times are skipped, drivers already
+    knocked out of qualifying don't count (their time belongs to an earlier part), and equal times all get the flag.
+    """
+    times = {}
+    for r in rows:
+        r['fastest'] = False
+        t = clock_seconds(r.get('best'))
+        if t and t > 0 and not (qualifying and r.get('knocked_out')):
+            times[r['number']] = t
+    if not times:
+        return
+    best = min(times.values())
+    for r in rows:
+        r['fastest'] = abs(times.get(r['number'], float('inf')) - best) < 1e-9
 
 
 def active_yellows(messages: list) -> tuple[list[dict], int]:
@@ -370,15 +392,44 @@ class Feed:
             if parsed:
                 self.events.append((parsed[2], parsed[0], parsed[1]))
 
+    def growing(self) -> bool:
+        """Still being written (a recording in progress): the end of the file is not the end of the session."""
+        try:
+            return time.time() - self.path.stat().st_mtime < GROWING_AFTER
+        except OSError:
+            return False
+
+    def _bounds(self) -> tuple[float | None, float | None]:
+        return self.first_time(), self.last_time()
+
     def clock(self) -> float | None:
         if self.mode != 'replay' or self.t0 is None:
             return None
         if self.paused and self.paused_at is not None:
             return self.paused_at
-        return self.t0 + (time.time() - self.wall0) * self.speed
+        now = self.t0 + (time.time() - self.wall0) * self.speed
+        start, end = self._bounds()
+        if start is not None and now < start:
+            now = start
+        if end is not None and now >= end:
+            now = end
+            if not self.growing():
+                # End of a finished recording: stop there instead of running on into nothing.
+                self.paused, self.paused_at = True, end
+        return now
+
+    def at_end(self) -> bool:
+        end = self.last_time()
+        return bool(self.mode == 'replay' and self.paused and end is not None and self.paused_at is not None
+                    and self.paused_at >= end and not self.growing())
 
     def seek(self, t: float):
         with self.lock:
+            start, end = self._bounds()
+            if start is not None:
+                t = max(start, t)
+            if end is not None:
+                t = min(end, t)
             self.t0, self.wall0 = t, time.time()
             if self.paused:
                 self.paused_at = t
@@ -396,6 +447,10 @@ class Feed:
             if paused and not self.paused:
                 self.paused_at, self.paused = self.clock(), True
             elif not paused and self.paused:
+                if self.at_end():
+                    # Play at the very end starts again from the beginning.
+                    self.paused_at = self.first_time()
+                    self.state, self.cursor = LiveState(), 0
                 self.t0, self.wall0, self.paused = self.paused_at, time.time(), False
 
     def snapshot(self) -> dict[str, Any]:
@@ -421,6 +476,7 @@ class Feed:
             snap = self.state.snapshot(now)
             snap['feed'] = dict(mode=self.mode, file=self.path.name, speed=self.speed, paused=self.paused,
                                 start=self.first_time(), end=self.last_time(), clock=now, messages=len(self.events),
+                                ended=self.at_end(), growing=self.growing(),
                                 updated=self.path.stat().st_mtime if self.path.exists() else None)
             return snap
 
@@ -431,11 +487,30 @@ class Feed:
             return time.time()
 
 
+def new_recording_path(folder: Path, now: datetime | None = None) -> Path:
+    """A recording file that did not exist before, created empty so nothing else can take the name.
+
+    Named to the second, with a numeric suffix if that is still taken: two recordings started in the same
+    minute (start, stop, start) must never share a file, because the second would wipe the first.
+    """
+    folder.mkdir(parents=True, exist_ok=True)
+    stem = f"live_{(now or datetime.now()).strftime('%Y-%m-%d_%H%M%S')}"
+    for n in range(1, 1000):
+        path = folder / (f'{stem}.txt' if n == 1 else f'{stem}_{n}.txt')
+        try:
+            path.open('x', encoding='utf-8').close()   # exclusive: fails if the file exists
+            return path
+        except FileExistsError:
+            continue
+    raise RuntimeError('Could not find a free recording name.')
+
+
 class Recorder:
     """Runs scripts/record_live.py in the background, writing to a file."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, command: list[str] | None = None):
         self.root = root
+        self.command = command or [sys.executable, str(root / 'scripts' / 'record_live.py')]
         self.proc: subprocess.Popen | None = None
         self.path: Path | None = None
         self.log: Path | None = None
@@ -446,9 +521,12 @@ class Recorder:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self.log = path.with_suffix('.log')
-        logf = self.log.open('w', encoding='utf-8')
-        self.proc = subprocess.Popen([sys.executable, str(self.root / 'scripts' / 'record_live.py'), str(path)],
-                                     cwd=str(self.root), stdout=logf, stderr=subprocess.STDOUT)
+        logf = self.log.open('a', encoding='utf-8')   # append: never wipe an earlier log or recording
+        try:
+            self.proc = subprocess.Popen([*self.command, str(path)],
+                                         cwd=str(self.root), stdout=logf, stderr=subprocess.STDOUT)
+        finally:
+            logf.close()   # the child process has its own handle
 
     def running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -463,6 +541,91 @@ class Recorder:
             tail = self.log.read_text(encoding='utf-8', errors='replace')[-800:]
         return dict(running=self.running(), file=self.path.name if self.path else None,
                     exit_code=None if self.proc is None or self.running() else self.proc.returncode, log=tail)
+
+
+# ------------------------------------------------------------------ recording info
+
+_info_cache: dict[str, tuple[tuple[int, float], dict[str, Any]]] = {}
+
+
+def recording_info(path: Path, max_lines: int = 400) -> dict[str, Any]:
+    """Which session a recording holds, from its SessionInfo message (near the top of the file)."""
+    path = Path(path)
+    try:
+        st = path.stat()
+    except OSError:
+        return {}
+    key, stamp = str(path), (st.st_size, st.st_mtime)
+    hit = _info_cache.get(key)
+    if hit and hit[0] == stamp:
+        return hit[1]
+    info: dict[str, Any] = {}
+    try:
+        with path.open('r', encoding='utf-8', errors='replace') as f:
+            for i, line in enumerate(f):
+                if i >= max_lines:
+                    break
+                if 'SessionInfo' not in line:
+                    continue
+                parsed = parse_line(line)
+                if not parsed:
+                    continue
+                topic, data, _ = parsed
+                if topic == 'SessionInfo' and isinstance(data, dict) and (data.get('Meeting') or data.get('Name')):
+                    meeting = data.get('Meeting') or {}
+                    info = dict(meeting=meeting.get('Name') or '', session=data.get('Name') or '', type=data.get('Type') or '',
+                                year=_year(data), start=data.get('StartDate') or '', path=data.get('Path') or '')
+                    break
+    except OSError:
+        return {}
+    if info and time.time() - st.st_mtime > GROWING_AFTER:
+        _info_cache[key] = (stamp, info)   # finished files don't change
+    return info
+
+
+def plain(text: Any) -> str:
+    """'São Paulo Grand Prix' → 'sao paulo grand prix' (accents and punctuation removed) for matching names."""
+    import re as _re
+    import unicodedata
+    value = unicodedata.normalize('NFD', str(text or '')).encode('ascii', 'ignore').decode()
+    return _re.sub(r'[^a-z0-9]+', ' ', value.lower()).strip()
+
+
+SESSION_NAMES = {'R': ('race',), 'Q': ('qualifying',), 'S': ('sprint',), 'SQ': ('sprint qualifying', 'sprint shootout'),
+                 'FP1': ('practice 1',), 'FP2': ('practice 2',), 'FP3': ('practice 3',)}
+
+
+def find_recording(folders: list[Path], year: int, event: str, code: str) -> Path | None:
+    """The owner's own recording of a session (largest file when there are several), or None."""
+    wanted = SESSION_NAMES.get(str(code).upper(), ())
+    best: tuple[int, Path] | None = None
+    for folder in folders:
+        if not folder.is_dir():
+            continue
+        for p in folder.glob('*.txt'):
+            info = recording_info(p)
+            if not info or plain(info.get('meeting')) != plain(event) or plain(info.get('session')) not in wanted:
+                continue
+            if info.get('year') and int(info['year']) != int(year):
+                continue
+            size = p.stat().st_size
+            if best is None or size > best[0]:
+                best = (size, p)
+    return best[1] if best else None
+
+
+def final_snapshot(path: Path) -> dict[str, Any]:
+    """Play a whole recording and return the timing picture at its end."""
+    state = LiveState()
+    with Path(path).open('r', encoding='utf-8', errors='replace') as f:
+        for line in f:
+            parsed = parse_line(line)
+            if parsed:
+                state.apply(parsed[0], parsed[1], parsed[2])
+    snap = state.snapshot(None)
+    snap['all_race_control'] = [m for m in _as_list((state.topics.get('RaceControlMessages') or {}).get('Messages')) if isinstance(m, dict)]
+    snap['weather_raw'] = state.topics.get('WeatherData') or {}
+    return snap
 
 
 # ------------------------------------------------------------------ track outline
@@ -488,6 +651,60 @@ def _outline_from(year: int, event: str, code: str, points: int) -> dict[str, An
                 rotation=rotation, length=float(d[-1]), source=f'{year} {s.event["EventName"]} {code}')
 
 
+def _auto_rotation(x, y) -> float:
+    """Rotation (FastF1's convention) that lays the circuit's longest straight horizontally,
+    with the finish line in the upper half: the way broadcast maps usually show a track."""
+    import numpy as np
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    n = len(x)
+    head = np.degrees(np.arctan2(np.roll(y, -3) - y, np.roll(x, -3) - x))
+    best = (0, 0)
+    for i in range(n):
+        j = i
+        while j - i < n and abs((head[j % n] - head[i] + 180) % 360 - 180) < 4:
+            j += 1
+        if j - i > best[0]:
+            best = (j - i, i)
+    a, b = best[1], (best[1] + best[0]) % n
+    rot = float(np.degrees(np.arctan2(y[b] - y[a], x[b] - x[a])))
+    r = -np.radians(rot)
+    # screen y = -(x sin r + y cos r); keep the finish line above the middle
+    if -(x[0] * np.sin(r) + y[0] * np.cos(r)) > -(x.mean() * np.sin(r) + y.mean() * np.cos(r)):
+        rot += 180
+    return rot
+
+
+def _outline_openf1(year: int, event: str, code: str, points: int) -> dict[str, Any]:
+    """Same shape from OpenF1 (free historical data): the fastest lap's car positions.
+
+    Needed since F1 closed its timing archive to FastF1 (Oct 2026)."""
+    import numpy as np
+    import pandas as pd
+    from services.openf1_comparison import historical, resolve
+    session = resolve(year, event, code)
+    key = int(session['session_key'])
+    laps = pd.DataFrame(historical('laps', {'session_key': key}))
+    laps = laps.dropna(subset=['lap_duration', 'date_start'])
+    laps = laps[(laps.lap_duration > 0) & (laps.get('is_pit_out_lap', False) != True)]  # noqa: E712
+    if laps.empty:
+        raise ValueError('no timed laps')
+    lap = laps.sort_values('lap_duration').iloc[0]
+    start = pd.to_datetime(lap.date_start, utc=True)
+    end = start + pd.Timedelta(seconds=float(lap.lap_duration))
+    pos = pd.DataFrame(historical('location', {'session_key': key, 'driver_number': int(lap.driver_number),
+                                               'date>': start.isoformat(), 'date<': end.isoformat()}))
+    if len(pos) < 50:
+        raise ValueError('too few position samples')
+    x, yy = pos.x.to_numpy(float), pos.y.to_numpy(float)
+    keep = np.r_[True, np.hypot(np.diff(x), np.diff(yy)) > 0]
+    x, yy = x[keep], yy[keep]
+    d = np.r_[0, np.cumsum(np.hypot(np.diff(x), np.diff(yy)))]
+    grid = np.linspace(0, d[-1], points, endpoint=False)   # the lap starts at the finish line
+    gx, gy = np.interp(grid, d, x), np.interp(grid, d, yy)
+    return dict(x=np.round(gx).tolist(), y=np.round(gy).tolist(), rotation=_auto_rotation(gx, gy), length=float(d[-1]) / 10,
+                source=f"{year} {event} {'qualifying' if code == 'Q' else 'race'} ({int(lap.driver_number)}, OpenF1)")
+
+
 def track_outline(year: int | None, event: str, points: int = 500, store: Path | None = None) -> dict[str, Any]:
     """Circuit shape from a past fastest lap at this event, starting at the finish line.
 
@@ -496,24 +713,38 @@ def track_outline(year: int | None, event: str, points: int = 500, store: Path |
     """
     import fastf1
     import re as _re
-    slug = _re.sub(r'[^a-z0-9]+', '-', event.lower()).strip('-')
+    import unicodedata
+    plain = unicodedata.normalize('NFD', event).encode('ascii', 'ignore').decode()   # "São" → "Sao"
+    slug = _re.sub(r'[^a-z0-9]+', '-', plain.lower()).strip('-')
     saved = store / f'{slug}.json' if store else None
     if saved and saved.is_file():
         return json.loads(saved.read_text(encoding='utf-8'))
     years = [y for y in ((year or 2026) - 1, (year or 2026) - 2, (year or 2026) - 3) if y >= 2018]
     tried = []
-    for offline in (True, False):
+    # 1) FastF1's local cache, only where it really holds that session (an empty cache can make FastF1
+    #    stall for minutes), 2) OpenF1 (free, online). FastF1 online is skipped: F1 now requires a login.
+    cache_root = Path(__file__).resolve().parents[1] / 'fastf1_cache'
+    folder_name = event.replace(' ', '_')
+    names = {'Q': 'Qualifying', 'R': 'Race'}
+
+    def cached(y, code):
+        return any(cache_root.glob(f'{y}/*{folder_name}/*{names[code]}/*.ff1pkl'))
+
+    for source in ('cache', 'openf1'):
+        offline = source == 'cache'
         for y in years:
             for code in ('Q', 'R'):
+                if source == 'cache' and not cached(y, code):
+                    continue
                 try:
                     fastf1.Cache.offline_mode(offline)
-                    result = _outline_from(y, event, code, points)
+                    result = _outline_openf1(y, event, code, points) if source == 'openf1' else _outline_from(y, event, code, points)
                     if saved:
                         saved.parent.mkdir(parents=True, exist_ok=True)
                         saved.write_text(json.dumps(result), encoding='utf-8')
                     return result
                 except Exception as exc:
-                    tried.append(f"{y} {code}{' (cache)' if offline else ''}: {str(exc)[:80]}")
+                    tried.append(f"{y} {code} ({source}): {str(exc)[:80]}")
                 finally:
                     fastf1.Cache.offline_mode(False)
     raise ValueError('No circuit outline available. ' + '; '.join(tried[:4]))

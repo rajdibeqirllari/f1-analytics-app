@@ -17,7 +17,8 @@ export default function YearOdometer({year,years,onChange}:{year:number;years:nu
    onPointerDown={e=>{drag.current={x:e.clientX,start:year,moved:false};e.currentTarget.setPointerCapture(e.pointerId)}}
    onPointerMove={e=>{const g=drag.current;if(!g)return;const steps=Math.round((g.x-e.clientX)/46);if(steps){g.moved=true;set(g.start+steps)}}}
    onPointerUp={()=>{drag.current=null}} onPointerCancel={()=>{drag.current=null}}>
-   {digits.map((d,i)=><span className="rhx-digit" key={i}><span className="rhx-digit-reel" style={{transform:`translateY(${-d*10}%)`,transitionDelay:`${(digits.length-1-i)*40}ms`}}>
+   <span className="rhx-sr">{year}</span>
+   {digits.map((d,i)=><span className="rhx-digit" key={i} aria-hidden="true"><span className="rhx-digit-reel" style={{transform:`translateY(${-d*10}%)`,transitionDelay:`${(digits.length-1-i)*40}ms`}}>
     {Array.from({length:10},(_,n)=><span key={n} aria-hidden="true">{n}</span>)}</span></span>)}
   </div>
   <button type="button" className="rhx-year-step" disabled={year>=max} onClick={()=>set(year+1)} aria-label={`Season ${year+1}`}>{year<max?year+1:''}</button>

@@ -1,24 +1,22 @@
 import {useState} from 'react';
 import {useSession} from '../state';
-import {portrait,teamColor,type Driver} from '../api';
+import {teamColor,type Driver} from '../api';
 
 type Slot='driver'|'driver_b';
-const CARS:[RegExp,string][]=[[/racingbull|^rb|visacash|alphatauri/,'racingbulls'],[/redbull/,'redbull'],[/ferrari/,'ferrari'],[/mercedes/,'mercedes'],
- [/mclaren/,'mclaren'],[/astonmartin/,'astonmartin'],[/alpine/,'alpine'],[/williams/,'williams'],[/haas/,'haas'],[/audi|sauber/,'audi'],[/cadillac/,'cadillac']];
-function carArt(team:string,year:number){if(year!==2026)return '';const key=(team||'').toLowerCase().replace(/[^a-z]/g,'');const hit=CARS.find(([re])=>re.test(key));return hit?`/art/f1_2026/${hit[1]}.png`:''}
-
-function Portrait({src,alt}:{src:string;alt:string}){
- const [failed,setFailed]=useState(false);
- if(!src||failed)return null;
- return <img className="rhx-side-portrait" src={portrait(src)} alt={alt} onError={()=>setFailed(true)}/>;
+/** A plain single-seater silhouette in the team colour: no liveries, sponsor logos, F1 renders or driver photos
+ * (those belong to F1 and the teams, and were hotlinked from formula1.com). Safe for streams. */
+function Silhouette(){
+ return <svg className="rhx-side-livery" viewBox="0 0 400 110" aria-hidden="true" focusable="false">
+  <path fill="currentColor" d="M18 70h40l16-14h70l26-18h70l28 18h56l40 10v10l-30 4H310a26 26 0 0 0-50 0H150a26 26 0 0 0-50 0H40l-22-6z"/>
+  <path fill="currentColor" opacity=".55" d="M6 54h46v10H6zM348 66h44v14h-44z"/>
+  <circle cx="125" cy="90" r="20" fill="#0b1015"/><circle cx="285" cy="90" r="20" fill="#0b1015"/>
+  <circle cx="125" cy="90" r="9" fill="currentColor" opacity=".4"/><circle cx="285" cy="90" r="9" fill="currentColor" opacity=".4"/></svg>;
 }
 
-function Side({slot,code,entry,active,onActivate,year}:{slot:Slot;code:string;entry?:Driver;active:boolean;onActivate:()=>void;year:number}){
+function Side({slot,code,entry,active,onActivate}:{slot:Slot;code:string;entry?:Driver;active:boolean;onActivate:()=>void;year:number}){
  const {selection:s,setSelection,catalog}=useSession();
  const lapKey=slot==='driver'?'lap':'lap_b';
  const laps=entry?(entry.segments?.[s.qualifying_part]||entry.laps||[]):[];
- const car=entry?carArt(entry.team,year):'';
- const [carFailed,setCarFailed]=useState('');
  return <div className={'rhx-side '+(slot==='driver'?'is-a ':'is-b ')+(active?'is-active':'')} style={{'--team':teamColor(entry?.color)} as React.CSSProperties}>
   <button type="button" className="rhx-side-pick" onClick={onActivate} aria-pressed={active}>
    <span className="rhx-side-slot">{slot==='driver'?'Left side':'Right side'}{active?' · choosing':''}</span>
@@ -26,8 +24,7 @@ function Side({slot,code,entry,active,onActivate,year}:{slot:Slot;code:string;en
    <span className="rhx-side-name">{entry?.name||'Choose a driver below'}</span>
    <span className="rhx-side-team">{entry?.team}</span>
   </button>
-  {car&&carFailed!==car&&<img className="rhx-side-car" src={car} alt="" aria-hidden="true" onError={()=>setCarFailed(car)}/>}
-  {entry&&<Portrait key={entry.portrait} src={entry.portrait} alt={entry.name}/>}
+  {entry&&<Silhouette/>}
   {entry&&<div className="rhx-laps" role="radiogroup" aria-label={`${code} lap`}>
    <button type="button" role="radio" aria-checked={!s[lapKey]} className={!s[lapKey]?'on':''} onClick={()=>setSelection({[lapKey]:null})}>
     {catalog?.source==='OpenF1'?'Fastest timed':'Fastest'}</button>
@@ -68,8 +65,9 @@ export default function DriverDuel(){
    {[...teams.entries()].map(([team,list])=><div className="rhx-team" role="listitem" key={team} style={{'--team':teamColor(list[0][1].color)} as React.CSSProperties}>
     <span className="rhx-team-name">{team}</span>
     {list.map(([code,d])=>{const side=s.driver===code?'A':s.driver_b===code?'B':'';
-     return <button type="button" key={code} className={'rhx-tile '+(side?'is-'+side.toLowerCase():'')} onClick={()=>choose(code)} aria-label={`${d.name}, ${d.team}${side?`, on the ${side==='A'?'left':'right'} side`:''}`}>
-      <b>{code}</b><span>{d.name.split(' ').slice(-1)[0]}</span>{side&&<i>{side==='A'?'L':'R'}</i>}
+     const none=!d.laps?.length;
+     return <button type="button" key={code} disabled={none} title={none?`${d.name} has no timed lap in this session${d.status?` (${d.status})`:''}`:undefined} className={'rhx-tile '+(side?'is-'+side.toLowerCase():'')+(none?' is-none':'')} onClick={()=>choose(code)} aria-label={`${d.name}, ${d.team}${none?', no timed lap':''}${side?`, on the ${side==='A'?'left':'right'} side`:''}`}>
+      <b>{code}</b><span>{none?(d.status||'No lap'):d.name.split(' ').slice(-1)[0]}</span>{side&&<i>{side==='A'?'L':'R'}</i>}
      </button>})}
    </div>)}
   </div>
@@ -109,8 +107,9 @@ export function DuelBar({pair=true,laps=true}:{pair?:boolean;laps?:boolean}){
   {open&&<div className="rhx-grid is-drawer">{[...teams.entries()].map(([team,list])=><div className="rhx-team" key={team} style={{'--team':teamColor(list[0][1].color)} as React.CSSProperties}>
    <span className="rhx-team-name">{team}</span>
    {list.map(([code,d])=>{const side=s.driver===code?'A':pair&&s.driver_b===code?'B':'';
-    return <button type="button" key={code} className={'rhx-tile '+(side?'is-'+side.toLowerCase():'')} onClick={()=>choose(code)}>
-     <b>{code}</b><span>{d.name.split(' ').slice(-1)[0]}</span>{side&&<i>{side==='A'?'L':'R'}</i>}</button>})}
+    const none=!d.laps?.length;
+    return <button type="button" key={code} disabled={none} className={'rhx-tile '+(side?'is-'+side.toLowerCase():'')+(none?' is-none':'')} onClick={()=>choose(code)}>
+     <b>{code}</b><span>{none?(d.status||'No lap'):d.name.split(' ').slice(-1)[0]}</span>{side&&<i>{side==='A'?'L':'R'}</i>}</button>})}
   </div>)}</div>}
   {catalog.notice&&<p className="rhx-notice">{catalog.notice}</p>}
  </div>;

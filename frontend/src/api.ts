@@ -1,7 +1,7 @@
 export type Selection={year:number;event:string;session:string;driver:string;driver_b:string;lap:number|null;lap_b:number|null;qualifying_part:string};
 export type Output={id:string;url:string;name:string;category:string;size:number;modified:number;label?:string};
 export type Job={id:string;kind?:string;status:string;progress:number;message:string;error:string;result:any};
-export type Driver={name:string;team:string;color:string;portrait:string;laps:number[];segments?:Record<string,number[]>};
+export type Driver={name:string;team:string;color:string;portrait:string;laps:number[];segments?:Record<string,number[]>;status?:string};
 export type Catalog={drivers:Record<string,Driver>;source?:string;notice?:string;qualifying_segments?:boolean};
 export async function request<T=any>(url:string,options?:RequestInit):Promise<T>{
  const response=await fetch(url,options);

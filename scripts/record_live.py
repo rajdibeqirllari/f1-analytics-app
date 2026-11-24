@@ -80,4 +80,5 @@ from fastf1.livetiming.client import SignalRClient  # noqa: E402
 if __name__ == '__main__':
     out = sys.argv[1] if len(sys.argv) > 1 else 'tmp/live_timing.txt'
     print(f'Recording live timing to {out}. Leave this window open; press Ctrl+C to stop.')
-    SignalRClient(out, timeout=1800, no_auth=True).start()
+    # Append, never truncate: FastF1's default filemode 'w' would wipe an existing recording of the same name.
+    SignalRClient(out, filemode='a', timeout=1800, no_auth=True).start()

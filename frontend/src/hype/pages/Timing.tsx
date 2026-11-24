@@ -21,7 +21,7 @@ export default function Timing(){
   </PageHead>
   <JobBar task={task}/>
   {!r?!task.busy&&<Blank title="Every lap leaves a trace." mark="⏱">Load timing to see the classification, sectors and race control for this session.</Blank>:<>
-   <Note>{r.mode} Intervals aren't inferred from the final classification.</Note>
+   <p className="rhx-note"><b>Source: {r.source||'FastF1'}.</b> {r.mode} Intervals aren't inferred from the final classification.</p>
    <div className="rhx-timing">
     <div className="rhx-tower-wrap"><table className="rhx-tower">
      <thead><tr><th>Pos</th><th>Driver</th><th>Gap</th><th>Tyre</th><th>Best</th><th>Last</th><th>S1</th><th>S2</th><th>S3</th></tr></thead>
@@ -29,7 +29,7 @@ export default function Timing(){
       style={{'--team':teamColor(row.color)} as React.CSSProperties}>
       <td className="rhx-pos">{row.position??'—'}</td>
       <td className="rhx-who"><b>{row.driver}</b><small>{row.team}</small></td>
-      <td>{row.time==null?'—':`${row.position===1?'':'+'}${clock(row.time)}`}</td>
+      <td>{row.time!=null?`${row.position===1?'':'+'}${clock(row.time)}`:row.gap?String(row.gap):row.status&&row.status!=='Finished'?row.status:'—'}</td>
       <td>{row.compound?<span className={'rhx-tyre t-'+(TYRE[String(row.compound).toUpperCase()]||'x')} title={row.compound}>{TYRE[String(row.compound).toUpperCase()]||'?'}</span>:'—'}</td>
       {cell(row,'best')}{cell(row,'last')}{cell(row,'s1')}{cell(row,'s2')}{cell(row,'s3')}
      </tr>)}</tbody></table>

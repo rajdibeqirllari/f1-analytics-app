@@ -1,4 +1,4 @@
-import {useState} from 'react';
+import {useEffect,useState} from 'react';
 import {useSession,useTask,useResource} from '../../state';
 import {request} from '../../api';
 import {PageHead,NeedSession,Choice,Slider,NumberField,Group,Action,JobBar,FileButton,Note,SourcePicker,Shape} from '../kit';
@@ -15,7 +15,15 @@ export default function Overlays(){
  const [x,setX]=useState(80),[y,setY]=useState(1180),[format,setFormat]=useState('WebM VP9 Alpha'),[time,setTime]=useState(0);
  const options={source,upload_id:upload,fps,width,height,hud_width:hudWidth,position,x,y,time};
  const valid=source==='Upload CSV'?!!upload:!!catalog;
- const preset=CANVASES.find(c=>c[2]===width&&c[3]===height)?.[0]||'custom';
+ // Custom is a mode of its own: choosing it keeps Width/Height open even when the numbers match a preset.
+ const [custom,setCustom]=useState(false);
+ const preset=custom?'custom':CANVASES.find(c=>c[2]===width&&c[3]===height)?.[0]||'custom';
+ // A preview or export made with other settings must not look like it belongs to the current ones.
+ const settingsKey=JSON.stringify([s.year,s.event,s.session,s.driver,s.lap,s.qualifying_part,source,upload,fps,width,height,hudWidth,position,x,y,time,format]);
+ const [madeWith,setMadeWith]=useState('');
+ useEffect(()=>{if(task.result&&!madeWith)setMadeWith(settingsKey)},[task.result]);
+ const outdated=!!task.result&&!!madeWith&&madeWith!==settingsKey;
+ const run=(opts:Record<string,any>)=>{setMadeWith(settingsKey);task.start('hud',s,opts)};
  const noFfmpeg=!!health.value&&!health.value.ffmpeg&&format!=='PNG Sequence';
  const file=task.result?.file;
  const bar=(w:number)=><span className="rhx-sizebar" style={{width:w/560*100+'%'}}/>;
@@ -33,7 +41,7 @@ export default function Overlays(){
   {make==='overlay'&&(source==='Upload CSV'||catalog)&&<div className="rhx-studio">
    <div className="rhx-studio-controls">
     <Group title="Canvas">
-     <Choice label="Canvas" value={preset} variant="shapes" onChange={v=>{const c=CANVASES.find(c=>c[0]===v);if(c){setWidth(c[2]);setHeight(c[3])}}}
+     <Choice label="Canvas" value={preset} variant="shapes" onChange={v=>{const c=CANVASES.find(c=>c[0]===v);if(c){setCustom(false);setWidth(c[2]);setHeight(c[3])}else setCustom(true)}}
       options={[...CANVASES.map(([v,r,w,h])=>({value:v as string,label:r,hint:`${w} × ${h}`,visual:<Shape w={w} h={h}/>})),{value:'custom',label:'Custom',hint:'Any size'}]}/>
      {preset==='custom'&&<div className="rhx-pair"><NumberField label="Width" suffix="px" min={64} max={3840} value={width} onChange={setWidth}/><NumberField label="Height" suffix="px" min={64} max={3840} value={height} onChange={setHeight}/></div>}
     </Group>
@@ -51,9 +59,10 @@ export default function Overlays(){
      image={file?.name.endsWith('.png')?file.url:undefined} video={file?.name.endsWith('.webm')?file.url:undefined}/>
     <JobBar task={task}/>
     <div className="rhx-pair">
-     <Action quiet disabled={task.busy||!valid} sub={`at ${time.toFixed(1)}s`} onClick={()=>task.start('hud',s,{...options,format:'Preview'})}>Update preview</Action>
-     <Action disabled={task.busy||!valid||noFfmpeg} sub={format} onClick={()=>task.start('hud',s,{...options,format})}>Export overlay</Action>
+     <Action quiet disabled={task.busy||!valid} sub={`at ${time.toFixed(1)}s`} onClick={()=>run({...options,format:'Preview'})}>Update preview</Action>
+     <Action disabled={task.busy||!valid||noFfmpeg} sub={format} onClick={()=>run({...options,format})}>Export overlay</Action>
     </div>
+    {outdated&&<p className="rhx-note" role="status">Settings changed since this file was made. Update the preview or export again to match them.</p>}
     {task.result&&<div className="rhx-result"><FileButton file={file}/><Note>Source: {task.result.metadata.source}.{task.result.frames?` ${task.result.frames} frames, ${task.result.duration.toFixed(2)} s.`:''} MOV and PNG sequences are for your editor; browsers may not play them.</Note></div>}
    </aside>
   </div>}

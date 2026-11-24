@@ -148,15 +148,22 @@ def bundle(year, event, code):
 def catalog(year, event, code):
     session, drivers, laps = bundle(year, event, code)
     entries = {}
+    status = {}
+    try:   # why a driver has no timed lap (retired on lap one, did not start)
+        for r in historical('session_result', {'session_key': int(session['session_key'])}):
+            status[r.get('driver_number')] = 'DSQ' if r.get('dsq') else 'DNS' if r.get('dns') else 'DNF' if r.get('dnf') else ''
+    except Exception:
+        pass
     for d in drivers:
         numbers = laps[laps.driver_number == d['driver_number']].lap_number
-        if numbers.empty:
-            continue
         acronym = str(d.get('name_acronym') or d['driver_number'])
+        # Drivers without a timed lap stay in the grid (shown disabled), so nobody silently disappears.
         entries[acronym] = dict(name=d.get('full_name') or acronym, team=d.get('team_name') or '',
-            color=d.get('team_colour') or '', portrait=d.get('headshot_url') or '',
+            color=d.get('team_colour') or '', portrait='',
             laps=sorted({int(n) for n in numbers}))
-    if len(entries) < 2:
+        if numbers.empty:
+            entries[acronym]['status'] = status.get(d['driver_number']) or 'No timed lap'
+    if sum(1 for e in entries.values() if e['laps']) < 2:
         raise ValueError('OpenF1 has fewer than two drivers with timed laps.')
     return dict(drivers=entries, event=event, session=session['session_name'], source='OpenF1',
                 qualifying_segments=False, notice=NOTICE)

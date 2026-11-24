@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import numpy as np
@@ -33,15 +34,79 @@ FUTURE_FIELDS = ["active_aero_mode", "overtake_mode", "boost_mode", "recharge_mo
 
 
 def _first_column(frame: pd.DataFrame, *names: str) -> str | None:
-    lookup = {str(column).lower(): column for column in frame.columns}
+    """The column called one of ``names``: an exact match first, then the name as a whole word.
+
+    Whole words only: plain substring matching once read "Throttle" as the time column, because the alias "t"
+    is inside it. "Lap Time", "speed_kmh" and "Speed (km/h)" still match "time" / "speed".
+    """
+    lookup = {str(column).strip().lower(): column for column in frame.columns}
     for name in names:
         if name.lower() in lookup:
             return lookup[name.lower()]
     for name in names:
+        wanted = name.lower()
+        if len(wanted) < 2:
+            continue   # one-letter aliases (t, x, y, z) must match exactly
+        pattern = re.compile(r'(?<![a-z0-9])' + re.escape(wanted) + r'(?![a-z0-9])')
         for lowered, column in lookup.items():
-            if name.lower() in lowered:
+            if pattern.search(lowered):
                 return column
     return None
+
+
+TIME_COLUMNS = ("time_sec", "t", "Time", "SessionTime", "session_time", "timestamp", "elapsed", "seconds", "Date")
+BOOLEAN_WORDS = {"true", "false", "yes", "no", "on", "off", "1", "0", "1.0", "0.0"}
+
+
+def _boolean_like(series: pd.Series) -> bool:
+    """True for a column of real booleans or of true/false, yes/no, on/off, 0/1 values."""
+    if pd.api.types.is_bool_dtype(series):
+        return True
+    values = series.dropna()
+    if values.empty:
+        return False
+    return {str(v).strip().lower() for v in values.unique()} <= BOOLEAN_WORDS
+
+
+def _truthy(value: Any) -> bool:
+    if pd.isna(value):
+        return False
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"true", "yes", "on"}:
+        return True
+    try:
+        return float(text) > 0
+    except ValueError:
+        return False
+
+
+def _drs_columns(data: pd.DataFrame, source: str) -> tuple[pd.Series, pd.Series]:
+    """(drs_raw, drs_active) from whatever DRS columns the data has.
+
+    Two different things share the name "DRS": the car's numeric status code (10, 12, 14 = open) and a plain
+    open/closed flag. A boolean column is the flag and is used as it is; only real codes go through the code table.
+    FastF1 and OpenF1 always send codes, so their 0/1 values are never read as booleans.
+    """
+    blank_raw = pd.Series([pd.NA] * len(data), index=data.index, dtype="Int64")
+    active_col = _first_column(data, "drs_active")
+    raw_col = _first_column(data, "drs_raw", "DRS", "drs")
+    if raw_col == active_col:
+        raw_col = None
+    codes_only = source in ("FastF1", "OpenF1")
+    raw, active = blank_raw, None
+    if raw_col is not None:
+        if not codes_only and _boolean_like(data[raw_col]):
+            active = data[raw_col].map(_truthy)
+        else:
+            raw = pd.to_numeric(data[raw_col], errors="coerce").round().astype("Int64")
+            active = data[raw_col].map(_drs_value)
+    if active_col is not None:
+        active = data[active_col].map(_truthy)   # an explicit open/closed column wins
+    if active is None:
+        active = pd.Series([False] * len(data), index=data.index)
+    return raw, active.astype(bool)
 
 
 def _time_seconds(series: pd.Series) -> pd.Series:
@@ -83,10 +148,14 @@ def normalize_telemetry(frame: pd.DataFrame, source: str) -> pd.DataFrame:
     if frame is None or frame.empty:
         raise ValueError("The selected source returned no telemetry rows.")
     data = frame.copy()
-    time_col = _first_column(data, "time_sec", "t", "Time", "SessionTime", "session_time")
+    time_col = _first_column(data, *TIME_COLUMNS)
     speed_col = _first_column(data, "speed_kmh", "Speed")
-    if time_col is None or speed_col is None:
-        raise ValueError("Telemetry needs a time column and a speed column.")
+    if time_col is None:
+        raise ValueError("No time column found. Name one column time_sec, t, Time, SessionTime, timestamp or Date "
+                         f"(columns in this file: {', '.join(str(c) for c in data.columns)}).")
+    if speed_col is None:
+        raise ValueError("No speed column found. Name one column Speed or speed_kmh "
+                         f"(columns in this file: {', '.join(str(c) for c in data.columns)}).")
     time_sec = _time_seconds(data[time_col])
     if time_sec.notna().any():
         time_sec = time_sec - float(time_sec.dropna().iloc[0])
@@ -100,7 +169,7 @@ def normalize_telemetry(frame: pd.DataFrame, source: str) -> pd.DataFrame:
     date_col = _first_column(data, "date", "Date")
     session_col = _first_column(data, "session_time", "SessionTime")
     brake_col = _first_column(data, "brake_active", "Brake")
-    drs_raw_col = _first_column(data, "drs_raw", "DRS")
+    drs_raw, drs_active = _drs_columns(data, source)
     distance = numeric("distance_m", "Distance")
     max_distance = distance.max(skipna=True)
     relative = numeric("relative_distance", "RelativeDistance")
@@ -117,8 +186,8 @@ def normalize_telemetry(frame: pd.DataFrame, source: str) -> pd.DataFrame:
             "gear": numeric("gear", "nGear", "n_gear").round().astype("Int64"),
             "throttle_pct": numeric("throttle_pct", "Throttle").clip(0, 100),
             "brake_active": data[brake_col].map(_bool_value) if brake_col else False,
-            "drs_raw": numeric("drs_raw", "DRS").round().astype("Int64"),
-            "drs_active": data[drs_raw_col].map(_drs_value) if drs_raw_col else False,
+            "drs_raw": drs_raw,
+            "drs_active": drs_active,
             "distance_m": distance,
             "relative_distance": relative,
             "x": numeric("x", "X"),

@@ -1,4 +1,4 @@
-import {useRef,useState,type ReactNode} from 'react';
+import {useId,useRef,useState,type ReactNode} from 'react';
 import {Link,useLocation} from 'react-router-dom';
 import {ArrowDownToLine} from 'lucide-react';
 import {countryFlags,teamColor,type Output} from '../api';
@@ -48,13 +48,17 @@ export function NeedSession({what}:{what:string}){
 export type Opt<T>={value:T;label:ReactNode;hint?:ReactNode;visual?:ReactNode;disabled?:boolean};
 /** Replaces every dropdown: all options visible, one tap to choose. */
 export function Choice<T extends string|number>({label,value,options,onChange,variant='chips',className=''}:{label:string;value:T;options:Opt<T>[];onChange:(v:T)=>void;variant?:'chips'|'cards'|'shapes';className?:string}){
- const box=useRef<HTMLDivElement>(null);
+ const box=useRef<HTMLDivElement>(null);const id=useId();
+ const live=options.filter(o=>!o.disabled);
+ // Roving tab stop: the chosen option, or the first enabled one when nothing is chosen.
+ const stop=live.some(o=>o.value===value)?value:live[0]?.value;
  const move=(e:React.KeyboardEvent)=>{const d={ArrowRight:1,ArrowDown:1,ArrowLeft:-1,ArrowUp:-1}[e.key];if(!d)return;e.preventDefault();
-  const live=options.filter(o=>!o.disabled);const i=live.findIndex(o=>o.value===value);const next=live[(i+d+live.length)%live.length];
+  if(!live.length)return;const i=live.findIndex(o=>o.value===value);
+  const next=i<0?(d>0?live[0]:live[live.length-1]):live[(i+d+live.length)%live.length];
   onChange(next.value);requestAnimationFrame(()=>box.current?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus())};
- return <div className={'rhx-field '+className}><span className="rhx-label" id={'l-'+label}>{label}</span>
-  <div ref={box} className={'rhx-choice is-'+variant} role="radiogroup" aria-labelledby={'l-'+label} onKeyDown={move}>
-   {options.map(o=>{const on=o.value===value;return <button type="button" role="radio" aria-checked={on} tabIndex={on?0:-1} key={String(o.value)} disabled={o.disabled}
+ return <div className={'rhx-field '+className}><span className="rhx-label" id={id}>{label}</span>
+  <div ref={box} className={'rhx-choice is-'+variant} role="radiogroup" aria-labelledby={id} onKeyDown={move}>
+   {options.map(o=>{const on=o.value===value;return <button type="button" role="radio" aria-checked={on} tabIndex={o.value===stop&&!o.disabled?0:-1} key={String(o.value)} disabled={o.disabled}
     className={on?'on':''} onClick={()=>onChange(o.value)}>{o.visual}<b>{o.label}</b>{o.hint&&<small>{o.hint}</small>}</button>})}
   </div></div>;
 }

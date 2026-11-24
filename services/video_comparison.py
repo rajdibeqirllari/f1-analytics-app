@@ -121,9 +121,15 @@ def load_video_session(year: int, event: str, session_code: str):
     return session
 
 
+def is_qualifying(session) -> bool:
+    name = str(getattr(session, "name", "") or "").lower()
+    return "qualifying" in name or "shootout" in name
+
+
 def filtered_laps(session, code: str, qualifying_part: str = "All"):
     laps = session.laps.pick_drivers(code).copy()
-    if qualifying_part != "All":
+    # A Q1/Q2/Q3 choice left over from a qualifying session must never slice a race or practice.
+    if qualifying_part != "All" and is_qualifying(session):
         splits = session.laps.split_qualifying_sessions()
         index = int(qualifying_part[-1]) - 1
         part = splits[index]
@@ -149,18 +155,19 @@ def session_catalog(year: int, event: str, session_code: str) -> dict:
         driver = session.get_driver(number)
         code = str(driver.get("Abbreviation") or number)
         laps = filtered_laps(session, code)
-        if laps.empty:
-            continue
+        # Drivers without a timed lap stay listed (the picker shows them disabled) instead of vanishing.
         entries[code] = {"name": str(driver.get("FullName") or code),
                          "team": str(driver.get("TeamName") or ''),
                          "color": str(driver.get("TeamColor") or ''),
-                         "portrait": str(driver.get("HeadshotUrl") or ''),
+                         "portrait": '',
                          "laps": sorted(int(n) for n in laps["LapNumber"].unique())}
+        if laps.empty:
+            entries[code]["status"] = str(driver.get("Status") or '') or 'No timed lap'
         if session_code in {"Q", "SQ"}:
             entries[code]["segments"] = {
                 part: sorted(int(n) for n in filtered_laps(session, code, part)["LapNumber"].unique())
                 for part in ("Q1", "Q2", "Q3")}
-    if len(entries) < 2:
+    if sum(1 for e in entries.values() if e["laps"]) < 2:
         raise ValueError("This session has fewer than two drivers with timed laps.")
     return {"drivers": entries, "event": str(session.event.get("EventName", event)),
             "session": str(session.name), "source": "FastF1"}

@@ -10,11 +10,34 @@ TYPES={'.mp4':'Videos','.webm':'Overlays','.mov':'Overlays','.png':'Images','.jp
        '.csv':'Telemetry','.tsv':'Telemetry','.json':'Data','.mp3':'Audio','.wav':'Audio','.zip':'Sequences'}
 _known={}
 _lock=RLock()
+# Internal working files, never listed or served as downloads (they stay on disk):
+#  * caches (OpenF1 responses, radio archive cache), HUD frame folders, uploads
+#  * outputs/live: recordings, the commentator's voice lines, and downloaded F1 team radio + transcripts.
+#    F1's radio audio is served only by the Live page's opt-in "Real radio" route, never from the Library.
+PRIVATE_DIRS={'cache','hud_frames','uploads','openf1_cache','live','replay_logs','work','frames','render_cache'}
+# Blender/3D working folders (output/video_studio/3d_xxxx) hold intermediate frames and scene files.
+PRIVATE_PREFIXES=('3d_',)
+
+
+def private(path):
+    resolved=Path(path).resolve()
+    for base in OUTPUT_ROOTS.values():
+        if resolved.is_relative_to(base):
+            parts=resolved.relative_to(base).parts[:-1]
+            return any(p.lower() in PRIVATE_DIRS or p.lower().startswith(PRIVATE_PREFIXES) for p in parts) or resolved.name.endswith('.audio.json')
+    return True
 
 
 def approved(path):
     resolved=Path(path).resolve()
-    return any(resolved.is_relative_to(base) for base in OUTPUT_ROOTS.values()) and resolved.suffix.lower() in TYPES
+    return (any(resolved.is_relative_to(base) for base in OUTPUT_ROOTS.values()) and resolved.suffix.lower() in TYPES
+            and not private(resolved))
+
+
+def servable(path):
+    """Files the app may hand out by id. Downloaded team radio (outputs/radio/cache) is served for the Radio page's
+    own player through /api/radio, not here."""
+    return approved(path)
 
 
 def descriptor(path):
@@ -34,7 +57,7 @@ def library():
         if not base.exists(): continue
         for directory,dirs,files in os.walk(base,followlinks=False):
             # Prune before traversal: a HUD sequence may contain hundreds of thousands of frames.
-            dirs[:]=[d for d in dirs if d not in ('cache','hud_frames','uploads') and not Path(directory,d).is_symlink()]
+            dirs[:]=[d for d in dirs if d.lower() not in PRIVATE_DIRS and not d.lower().startswith(PRIVATE_PREFIXES) and not Path(directory,d).is_symlink()]
             for name in files:
                 path=Path(directory,name)
                 if path.suffix.lower() not in TYPES or '.partial.' in name: continue

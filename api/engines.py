@@ -61,6 +61,16 @@ def catalog(s):
 
 
 def timing(s):
+    """Classification and context for a session: FastF1 (cache) -> OpenF1 -> the owner's own live recording."""
+    try:
+        return _fastf1_timing(s)
+    except Exception as primary:
+        from services import timing_fallback
+        return clean(timing_fallback.timing(s.year,s.event,s.session,primary,
+                                            [ROOT/'outputs'/'live',ROOT/'tmp']))
+
+
+def _fastf1_timing(s):
     session=session_for(s)
     try:
         # Load these channels once, without reloading laps or telemetry.
@@ -124,7 +134,8 @@ def load_telemetry(s,source='Auto',upload_id=None):
         except Exception as exc:
             if source!='Auto': raise
             fallback=str(exc)
-    lap,full,meta,lapmeta=load_openf1_lap(s.year,s.event,s.session,s.driver,'Lap number' if s.lap else 'Fastest',s.lap)
+    lap,full,meta,lapmeta=load_openf1_lap(s.year,s.event,s.session,s.driver,'Lap number' if s.lap else 'Fastest',s.lap,
+                                         qualifying_part=s.qualifying_part)
     return lap,full,dict(source='OpenF1',driver=s.driver,lap_number=lapmeta.get('lap_number'),fallback=fallback)
 
 

@@ -2,16 +2,14 @@ import {useEffect,useMemo,useRef,useState} from 'react';
 import {request,teamColor} from '../../api';
 import {useSession,useTask,useResource} from '../../state';
 import {PageHead,Choice,Group,Action,JobBar,Blank,Note} from '../kit';
+import {bundledCircuit} from '../circuits';
 
 /* Race replay in the Live page's look: timing tower, broadcast map and driver card, driven by the
  * recorded positions the replay engine builds (the same frames the classic viewer plays). */
 
-const BUNDLED=import.meta.glob('../circuits/*.json',{eager:true,import:'default'}) as Record<string,{rotation:number}>;
-const slug=(v:string)=>v.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
-
 type Car={x:number|null;y:number|null;lap:number;speed:number;gear:number;throttle:number;brake:boolean;tyre:string;tyre_age:number;status:string;drs_active:boolean;position:number;gap:string};
 type Frame={t:number;lap:number;track_status:string;drivers:Record<string,Car>};
-type Payload={meta:{year:number;event:string;round:number;session:string;duration_seconds:number;sample_rate_hz:number};
+type Payload={meta:{year:number;event:string;round:number;session:string;duration_seconds:number;sample_rate_hz:number;source?:string;attribution?:string};
  track:{centerline:number[][]};drivers:Record<string,{name:string;team:string;number:string;color:string}>;frames:Frame[];
  technical:{frame_count:number;driver_count:number;track_statuses:{start_time:number;end_time:number;label:string}[]}};
 
@@ -34,7 +32,7 @@ function prepare(pl:Payload){
  const L=len[len.length-1];const res:number[][]=[];let j=0;
  for(let i=0;i<RES;i++){const d=i/RES*L;while(len[j+1]<d)j++;const a=raw[j],b=raw[(j+1)%raw.length],k=(d-len[j])/((len[j+1]-len[j])||1);res.push([a[0]+(b[0]-a[0])*k,a[1]+(b[1]-a[1])*k])}
  // Orientation: the bundled circuit's when we have one, otherwise the long side horizontal with the line on top.
- let rot=BUNDLED[`../circuits/${slug(pl.meta.event)}.json`]?.rotation;
+ let rot=bundledCircuit(pl.meta.event)?.rotation;   // shared slug: "São Paulo" finds sao-paulo-grand-prix.json
  if(rot==null){const mx=res.reduce((a,p)=>a+p[0],0)/RES,my=res.reduce((a,p)=>a+p[1],0)/RES;let sxx=0,syy=0,sxy=0;
   for(const p of res){const dx=p[0]-mx,dy=p[1]-my;sxx+=dx*dx;syy+=dy*dy;sxy+=dx*dy}
   rot=-Math.atan2(2*sxy,sxx-syy)/2*180/Math.PI;
@@ -120,7 +118,16 @@ function ReplayMap({g,cars,flag,focus,onFocus}:{g:Geo;cars:MapCar[];flag:string;
  </svg>;
 }
 
-function Player({pl,onReload}:{pl:Payload;onReload:()=>void}){
+/** Space toggles playback only when focus isn't on something Space already operates. */
+function spaceIsForPlayer(e:KeyboardEvent){
+ if(e.code!=='Space'||e.ctrlKey||e.metaKey||e.altKey||e.shiftKey||e.repeat)return false;
+ const t=e.target;if(!(t instanceof HTMLElement))return true;   // window/document: nothing focused
+ if(t.isContentEditable)return false;
+ if(t instanceof HTMLInputElement)return t.type==='range';
+ return !(t instanceof HTMLButtonElement||t instanceof HTMLSelectElement||t instanceof HTMLTextAreaElement||t instanceof HTMLAnchorElement||t.getAttribute('role')==='button'||t.getAttribute('role')==='radio');
+}
+
+function Player({pl,onReload,hidden}:{pl:Payload;onReload:()=>void;hidden?:boolean}){
  const g=useMemo(()=>prepare(pl),[pl]);
  const t0=g.t[0],t1=g.t[g.t.length-1];
  const [T,setT]=useState(t0),[playing,setPlaying]=useState(false),[speed,setSpeed]=useState(1),[focus,setFocus]=useState<string|null>(null);
@@ -128,8 +135,12 @@ function Player({pl,onReload}:{pl:Payload;onReload:()=>void}){
  useEffect(()=>{let raf=0,last=performance.now();const frame=(now:number)=>{const dt=Math.min(.1,(now-last)/1000);last=now;
   if(live.current.playing)setT(x=>{const nx=Math.min(t1,x+dt*live.current.speed);if(nx>=t1)setPlaying(false);return nx});raf=requestAnimationFrame(frame)};
   raf=requestAnimationFrame(frame);return()=>cancelAnimationFrame(raf)},[t1]);
- useEffect(()=>{const key=(e:KeyboardEvent)=>{if(e.code==='Space'&&!(e.target instanceof HTMLInputElement&&e.target.type!=='range')){e.preventDefault();setPlaying(p=>!p)}};
-  window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key)},[]);
+ // One play/pause for the button and the keyboard: at the end, Play starts again from the beginning.
+ const pos=useRef(T);pos.current=T;
+ const toggle=()=>{if(!live.current.playing&&pos.current>=t1)setT(t0);setPlaying(p=>!p)};
+ useEffect(()=>{if(hidden){setPlaying(false);return}
+  const key=(e:KeyboardEvent)=>{if(spaceIsForPlayer(e)){e.preventDefault();toggle()}};
+  window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key)},[hidden,t0,t1]);
  const [k,a]=frameAt(g.t,T);const k2=Math.min(k+1,g.t.length-1);const fr=pl.frames[k];
  const race=['R','S'].includes(pl.meta.session);
  const [flag,flagText]=status(fr.track_status);
@@ -157,7 +168,7 @@ function Player({pl,onReload}:{pl:Payload;onReload:()=>void}){
  const statuses=pl.technical.track_statuses.filter(s=>s.start_time<=T).slice(-12).reverse();
  const mapCars:MapCar[]=rows.filter(r=>r.car).map(r=>{const [x,y]=r.p!=null?atPoint(g,r.p):[r.x,r.y];return {code:r.code,color:r.info.color,position:r.position,x,y,p:r.p,off:r.off,out:r.out}});
  const seek=(v:number)=>setT(Math.max(t0,Math.min(t1,v)));
- return <main className="rhx-page-body rhx-live-page">
+ return <main className="rhx-page-body rhx-live-page" hidden={hidden}>
   <section className={'rhx-livebar flag-'+flag}>
    <div className="rhx-livebar-event"><span className={'rhx-livedot '+(playing?'on':'')}/>Replay<b>{pl.meta.event}</b><span>{pl.meta.year} · {SESSION[pl.meta.session]||pl.meta.session}</span></div>
    {race&&<div className="rhx-livelap"><small>Lap</small><b>{Math.min(fr.lap||1,g.laps)}/{g.laps}</b></div>}
@@ -166,7 +177,7 @@ function Player({pl,onReload}:{pl:Payload;onReload:()=>void}){
   </section>
 
   <div className="rhx-replaybar">
-   <button type="button" onClick={()=>{if(T>=t1)setT(t0);setPlaying(!playing)}}>{playing?'Pause':'Play'}</button>
+   <button type="button" onClick={toggle} aria-pressed={playing}>{playing?'Pause':T>=t1?'Play again':'Play'}</button>
    <input type="range" min={t0} max={t1} step={.5} value={T} onChange={e=>seek(Number(e.target.value))} aria-label="Replay position"/>
    <span>{hms(T-t0)} / {hms(t1-t0)}</span>
    <div className="rhx-seg is-inline">{[1,2,5,10,30].map(v=><button type="button" key={v} className={speed===v?'on':''} onClick={()=>setSpeed(v)}>{v}×</button>)}</div>
@@ -190,7 +201,7 @@ function Player({pl,onReload}:{pl:Payload;onReload:()=>void}){
     <div className="rhx-livemap-wrap"><ReplayMap g={g} cars={mapCars} flag={flag} focus={focus} onFocus={c=>setFocus(focus===c?null:c)}/>
      {rows.some(r=>r.off&&!r.out)&&<div className="rhx-pitlane"><span>Pit lane</span>{rows.filter(r=>r.off&&!r.out).map(r=>
       <b key={r.code} style={{'--team':teamColor(r.info.color)} as React.CSSProperties}>{r.code}</b>)}</div>}
-     <small className="rhx-livemap-note">Recorded positions, {pl.meta.sample_rate_hz} samples a second, smoothed along the track.</small></div>
+     <small className="rhx-livemap-note">{pl.meta.source==='OpenF1'?`Car positions from OpenF1 (FastF1 had no data for this session), ${pl.meta.sample_rate_hz} samples a second. Speed is worked out from positions; gear, throttle, brake and DRS aren't included.`:`Recorded positions, ${pl.meta.sample_rate_hz} samples a second, smoothed along the track.`}</small></div>
     {sel&&<div className="rhx-livefocus" style={{'--team':teamColor(sel.info.color)} as React.CSSProperties}><b>{sel.code}</b><span>{sel.info.name}, {sel.info.team}</span>
      <dl><div><dt>Position</dt><dd>{sel.position<99?sel.position:'—'}</dd></div><div><dt>Lap</dt><dd>{sel.car?.lap??'—'}</dd></div>
       <div><dt>Speed</dt><dd>{sel.car?`${sel.car.speed} km/h`:'—'}</dd></div><div><dt>Gear</dt><dd>{sel.car?.gear||'N'}</dd></div>
@@ -214,16 +225,18 @@ export default function Replay(){
  const supported=['R','Q','S','SQ'].includes(s.session);
  const r=task.result;
  useEffect(()=>{setData(null);if(!r)return;const url=r.data||String(r.viewer).replace(/\/viewer$/,'/data');let alive=true;setOpening(true);setError('');setSettings(false);
-  request<Payload>(url).then(d=>{if(alive)setData(d)}).catch(e=>{if(alive)setError((e as Error).message)}).finally(()=>{if(alive)setOpening(false)});return()=>{alive=false}},[r]);
+  request<Payload>(url).then(d=>{if(alive)setData(d)}).catch(e=>{if(alive)setError(plain((e as Error).message))}).finally(()=>{if(alive)setOpening(false)});return()=>{alive=false}},[r]);
  async function clearCache(){setError('');try{await request('/api/replay-cache',{method:'DELETE'});cache.refresh()}catch(e){setError((e as Error).message)}}
  const load=()=>task.start('replay',s,{sample_rate:rate,refresh});
- if(data&&!settings)return <Player pl={data} onReload={()=>setSettings(true)}/>;
- return <main className="rhx-page-body">
+ // The player stays mounted while the settings are open, so position, speed and the focused driver survive.
+ const player=data&&<Player pl={data} onReload={()=>setSettings(true)} hidden={settings}/>;
+ if(data&&!settings)return player;
+ return <>{player}<main className="rhx-page-body">
   <PageHead title="Rewind. Relive." lede="Every car on the circuit from recorded positions, on the live timing screen. Play, pause, scrub, change speed and follow one driver.">
    <Action disabled={task.busy||!s.event||!supported} sub={supported?'Recorded positions':'Race, qualifying or sprint only'} onClick={load}>{r?'Reload replay':'Load replay'}</Action>
   </PageHead>
   {!supported&&<p className="rhx-error">Replays work for the race, qualifying, sprint and sprint qualifying. Pick one of those on the weekend page.</p>}
-  <JobBar task={task}/>
+  <JobBar task={{...task,error:task.error&&plain(task.error),job:task.job&&{...task.job,error:task.job.error&&plain(task.job.error)}}}/>
   {data&&settings?<div className="rhx-row"><button type="button" className="rhx-link" onClick={()=>setSettings(false)}>Back to the replay</button></div>
    :opening?<Blank title="Opening the replay…" mark="◌">Placing every car on the circuit.</Blank>
    :!task.busy&&<Blank title="The race, at your pace." mark="↺">Load the replay to watch the whole field move around the circuit, with the timing tower beside it.</Blank>}
@@ -232,7 +245,14 @@ export default function Replay(){
    <Choice label="Samples per second" value={rate} onChange={setRate} options={[1,3,5,10].map(v=>({value:v,label:String(v),hint:v===3?'Default':v===10?'Smoothest':undefined}))}/>
    <label className="rhx-check"><input type="checkbox" checked={refresh} onChange={e=>setRefresh(e.target.checked)}/><span>Rebuild this replay from scratch</span></label>
    <Note>Long sessions are capped at 6,000 frames by the replay engine. The loaded replay reports the rate it actually used.</Note>
-   <div className="rhx-row"><span className="rhx-count">{cache.value?.length||0} saved replays</span><button type="button" className="rhx-link" onClick={clearCache}>Clear saved replays</button></div>
+   <div className="rhx-row"><span className="rhx-count">{cache.value?.length||0} saved replays</span><button type="button" className="rhx-link" onClick={()=>{if(confirm('Delete every saved replay? They are rebuilt the next time you load one (slow for OpenF1 sessions).'))clearCache()}}>Clear saved replays</button></div>
   </Group>
- </main>;
+ </main></>;
+}
+
+/** Engine errors are sentences already; anything that looks like a Python traceback line is replaced by advice. */
+function plain(message:string){
+ if(/Session\.load|Traceback|Exception|Error:|not been loaded/i.test(message)&&!/could not be loaded\./.test(message))
+  return 'The replay data could not be loaded for this session. Try another session, or load it again later.';
+ return message;
 }

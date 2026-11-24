@@ -10,7 +10,7 @@ const COLS=['time_sec','speed_kmh','rpm','gear','throttle_pct','brake_active','d
 export default function Telemetry(){
  const {selection:s,setSelection,catalog}=useSession();const task=useTask();
  const [source,setSource]=useState('Auto'),[upload,setUpload]=useState(''),[fps,setFps]=useState(30);
- useEffect(()=>task.reset(),[s.year,s.event,s.session,s.driver,s.lap,source,upload]);
+ useEffect(()=>task.reset(),[s.year,s.event,s.session,s.driver,s.lap,s.qualifying_part,source,upload]);
  const r=task.result;const csv=source==='Upload CSV';
  const ready=csv?!!upload:!!catalog&&!!s.event;
  const hint=(f:any)=>{const n=(f.label||f.name).toLowerCase();return n.includes('after')||n.endsWith('.tsv')?PACKS.tsv:n.includes('racerender')?PACKS.racerender:PACKS.csv};

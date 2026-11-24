@@ -34,13 +34,13 @@ export default function Radio(){
    {codes.length>1&&<Choice label="Driver" value={driver} onChange={setDriver} options={[{value:'All',label:'Everyone',hint:String(clips.length)},...codes.map(c=>({value:c,label:c,hint:String(clips.filter(x=>String(x.driver)===c).length)}))]}/>}
    <div className="rhx-radio">
     <ol className="rhx-radio-list">{shown.map(c=><li key={c.idx}><button type="button" className={clip?.idx===c.idx?'on':''} style={{'--team':color(c)} as React.CSSProperties} onClick={()=>setActive(c.idx)}>
-     <span className="rhx-radio-lap">{c.lap==null?'—':`L${c.lap}`}</span><span><b>{c.driver_name||c.driver}</b><small>{c.time||'Time not recorded'}</small></span></button></li>)}
+     <span className="rhx-radio-lap">{c.lap==null?(c.pre?'Pre':'—'):`L${c.lap}`}</span><span><b>{c.driver_name||c.driver}</b><small>{c.pre?'Pre-race':c.time||'Time not recorded'}</small></span></button></li>)}
      {!shown.length&&<li><Note>The archive has no clips for this filter.</Note></li>}</ol>
     {clip?<div className="rhx-radio-player" style={{'--team':color(clip)} as React.CSSProperties}>
      <span className="rhx-radio-team">{clip.team||'Team radio'}</span><h2>{clip.driver_name||clip.driver}</h2>
      <Waveform key={clip.url} url={clip.url} audio={audio}/>
      <audio ref={audio} key={clip.url+'a'} src={clip.url} controls preload="metadata"/>
-     <dl><div><dt>Session time</dt><dd>{clip.time||'—'}</dd></div><div><dt>Lap / position</dt><dd>{clip.lap??'—'} / {clip.position??'—'}</dd></div><div><dt>Tyre</dt><dd>{clip.compound||'—'}</dd></div></dl>
+     <dl><div><dt>Session time</dt><dd>{clip.pre?'Pre-race':clip.time||'—'}</dd></div><div><dt>Lap / position</dt><dd>{clip.lap??'—'} / {clip.position??'—'}</dd></div><div><dt>Tyre</dt><dd>{clip.compound||'—'}</dd></div></dl>
      <a className="rhx-file" href={clip.url+'?download=true'}><b>Download this recording</b></a>
      <Note>Original archive audio. Coverage depends on the provider and isn't a complete feed.</Note>
     </div>:<Blank title="Pick a transmission."/>}
