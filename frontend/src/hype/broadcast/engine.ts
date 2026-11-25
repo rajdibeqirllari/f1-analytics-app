@@ -4,11 +4,14 @@
 import * as THREE from 'three';
 import {Buffer,Clock,TrackCurve,fetchSamples,neighbours,poses,type FeedInfo,type Pose,type SceneInfo,type TimingRow} from './data';
 import {labelTexture,makeCar,type CarObject} from './car';
+import {loadVenue,nightEnvironment,venueKey,type Venue,type Alignment} from './venue';
+import {isDetailed,makeDetailedCar,previewAvailable,resolveModel,type DetailedCar} from './models';
 
 export type CameraMode='pod'|'broadcast'|'cockpit';
 export type Hud={elapsed:number|null;utc:number|null;num:string|null;auto:boolean;code:string;name:string;team:string;color:string;timing:TimingRow|null;totalLaps:number|null;
  ahead:{code:string;color:string;m:number}|null;behind:{code:string;color:string;m:number}|null;flag:'ok'|'extrapolated'|'stale'|'none';
- cam:string;battle:string|null;buffering:boolean;error:string;onTrack:number;ghosted:boolean};
+ cam:string;battle:string|null;buffering:boolean;error:string;onTrack:number;ghosted:boolean;
+ venue:{name:string;status:'loading'|'ready'|'off'|'error';align:Alignment|null;why:string}|null;models:{count:number;preview:boolean;previewAvailable:boolean;labels:string[]}};
 
 const W=(x:number,y:number,z:number)=>new THREE.Vector3(x,z,-y);   // track plane (x east, y north, z up) → three.js
 const HALF=7;   // half the asphalt width (m)
@@ -56,6 +59,10 @@ export class BroadcastEngine{
  gen=0;inflight:AbortController|null=null;lastFetch=0;fetchErr='';raf=0;timer:any=0;ro:ResizeObserver;lastHud=0;onHud:(h:Hud)=>void;
  sites:Site[]=[];site=-1;cutAt=0;look=new THREE.Vector3();lookReady=false;fov=40;battle:string|null=null;camDir=new THREE.Vector3(1,0,0);camReady=false;lastSel:Pose|null=null;ghosted=false;
  disposed=false;
+ /** Procedural circuit (replaced by a venue model when one matches and lines up) and the far skyline. */
+ proc=new THREE.Group();far=new THREE.Group();venue:Venue|null=null;venueGen=0;venueState:Hud['venue']=null;
+ occluders:THREE.Object3D[]=[];occCheck=0;ray=new THREE.Raycaster();
+ key:THREE.DirectionalLight;envTex:THREE.Texture|null=null;preview=false;carGen=0;frameTimes:number[]=[];lastFrame=0;
 
  constructor(el:HTMLElement,onHud:(h:Hud)=>void){
   this.el=el;this.onHud=onHud;
@@ -71,6 +78,11 @@ export class BroadcastEngine{
   this.hemi=new THREE.HemisphereLight(0xdfeeff,0x5a6648,1.25);this.scene.add(this.hemi);
   this.sun=new THREE.DirectionalLight(0xfff1dc,1.9);this.sun.position.set(-600,900,400);this.scene.add(this.sun);
   this.amb=new THREE.AmbientLight(0xffffff,0);this.scene.add(this.amb);
+  // Key light for venue scenes: the floodlights' main direction, casting the shadow under nearby cars (follows the camera).
+  this.key=new THREE.DirectionalLight(0xfff3e4,0);this.key.castShadow=true;this.key.shadow.mapSize.set(2048,2048);
+  const sc=this.key.shadow.camera;sc.left=-26;sc.right=26;sc.top=26;sc.bottom=-26;sc.near=1;sc.far=160;this.key.shadow.bias=-0.0004;this.key.shadow.normalBias=0.03;
+  this.scene.add(this.key,this.key.target);
+  this.renderer.shadowMap.enabled=true;this.renderer.shadowMap.type=THREE.PCFSoftShadowMap;
   this.scene.add(this.world);
   this.ro=new ResizeObserver(()=>this.resize());this.ro.observe(el);this.resize();
   this.timer=setInterval(()=>this.pump(),250);
@@ -81,11 +93,14 @@ export class BroadcastEngine{
  resize(){const w=this.el.clientWidth||640,h=this.el.clientHeight||360;this.renderer.setSize(w,h,false);this.camera.aspect=w/h;this.camera.updateProjectionMatrix()}
 
  dispose(){this.disposed=true;cancelAnimationFrame(this.raf);clearInterval(this.timer);this.ro.disconnect();this.inflight?.abort();
-  this.clearWorld();this.renderer.dispose();this.renderer.domElement.remove();if((window as any).__rhxBroadcast===this)(window as any).__rhxBroadcast=null}
+  this.clearWorld();this.envTex?.dispose();this.renderer.dispose();this.renderer.domElement.remove();if((window as any).__rhxBroadcast===this)(window as any).__rhxBroadcast=null}
 
- clearWorld(){this.world.traverse(o=>{const m=o as THREE.Mesh;if(m.geometry)m.geometry.dispose();const mat=(m as any).material;
+ clearWorld(){this.venueGen++;this.carGen++;const v=this.venue;this.venue=null;if(v){v.dispose()}
+  // Detailed cars share geometry with the cached model: only their own materials are disposed.
+  for(const c of this.cars.values())if(isDetailed(c)){for(const m of c.mats)m.dispose();(c.label.material as THREE.SpriteMaterial).map?.dispose();c.group.removeFromParent()}
+  this.world.traverse(o=>{const m=o as THREE.Mesh;if(m.geometry)m.geometry.dispose();const mat=(m as any).material;
    if(mat){for(const x of Array.isArray(mat)?mat:[mat]){(x as any).map?.dispose?.();x.dispose()}}});
-  this.world.clear();this.cars.clear();this.labels.clear()}
+  this.occluders=[];this.world.clear();this.proc=new THREE.Group();this.far=new THREE.Group();this.cars.clear();this.labels.clear()}
 
  resetMotion(){this.gen++;this.inflight?.abort();this.inflight=null;this.buf=null;this.prev=null;this.hints.clear();this.headings.clear();this.correction.clear();
   this.site=-1;this.lookReady=false;this.camReady=false;this.battle=null;this.lastFetch=0}
@@ -111,6 +126,8 @@ export class BroadcastEngine{
   this.renderer.toneMappingExposure=night?1.15:1.05}
 
  setFeed(f:FeedInfo){this.feed=f;const r=this.clock.update(f,performance.now());if(r!=='ok')this.resetMotion();this.pump()}
+ /** Labelled preview of a constructor's latest modelled chassis on a session from another season. */
+ setPreview(on:boolean){if(on===this.preview)return;this.preview=on;if(this.info?.ok)this.buildCars(this.info)}
  setFocus(n:string|null){if(n!==this.focus){this.focus=n;this.site=-1;this.lookReady=false;this.camReady=false;this.battle=null}}
  setMode(m:CameraMode){if(m!==this.mode){this.mode=m;this.site=-1;this.lookReady=false;this.camReady=false}}
 
@@ -120,13 +137,44 @@ export class BroadcastEngine{
   this.applyEnv(info.session?.meeting||'');
   const tr=this.track=new TrackCurve(info.track);
   this.sites=this.buildSites(tr);
+  this.world.add(this.proc,this.far);
   this.buildWorld(tr,info);
-  for(const [num,m] of Object.entries(info.drivers)){const car=makeCar(m.color,m.code);car.group.visible=false;this.world.add(car.group);this.cars.set(num,car)}
+  this.buildCars(info);
+  // Venue model (only for matching meetings): the procedural circuit stays until the model is loaded and lines up.
+  const vk=venueKey(info.session?.meeting||'');this.venueState=null;this.key.intensity=0;this.scene.environment=null;
+  if(vk){const gen=this.venueGen;this.venueState={name:vk,status:'loading',align:null,why:''};
+   loadVenue(vk,this.renderer).then(v=>{if(gen!==this.venueGen||this.disposed||this.track!==tr){v.dispose();return}
+    const r=v.place(tr,info.track.frame);this.venueState={name:v.manifest.name,status:r.ok?'ready':'off',align:v.align,why:r.why};
+    if(!r.ok){v.dispose();return}
+    this.venue=v;this.world.add(v.root);this.proc.visible=false;this.far.visible=false;this.lightVenue();this.sites=this.venueSites(tr,v);this.site=-1;
+    (window as any).__rhxVenue={bytes:v.bytes,loadMs:Math.round(v.loadMs),align:v.align}})
+   .catch(e=>{if(gen===this.venueGen)this.venueState={name:vk,status:'error',align:null,why:(e as Error).message}})}
  }
+
+ /** Cars for this scene: the team's modelled chassis for its season (or the labelled preview), else the generic car.
+  * The generic car is shown at once and swapped when the model has loaded. */
+ buildCars(info:SceneInfo){
+  const gen=++this.carGen;
+  for(const [num,c] of this.cars){c.group.removeFromParent();if(isDetailed(c))for(const m of c.mats)m.dispose();this.cars.delete(num);this.labels.delete(num)}
+  for(const [num,m] of Object.entries(info.drivers)){const car=makeCar(m.color,m.code);car.group.visible=false;this.world.add(car.group);this.cars.set(num,car);
+   const r=resolveModel(m.team,info.session?.year,this.preview);if(!r)continue;
+   makeDetailedCar(r.entry,m.code,m.color).then(d=>{if(gen!==this.carGen||this.disposed||this.info!==info){for(const x of d.mats)x.dispose();return}
+    const old=this.cars.get(num);if(!old)return;
+    d.group.visible=old.group.visible;d.group.position.copy(old.group.position);d.group.rotation.copy(old.group.rotation);old.group.removeFromParent();
+    this.world.add(d.group);this.cars.set(num,d);this.labels.delete(num)}).catch(e=>console.warn('car model',e))}}
+
+ /** Floodlit night for venue scenes: image-based light with lamp rows, a key light for shadows, low fill. */
+ lightVenue(){
+  if(!this.envTex)this.envTex=nightEnvironment(this.renderer);
+  this.scene.environment=this.envTex;
+  this.hemi.color.set(0xaab8d8);this.hemi.groundColor.set(0x2c2a2e);this.hemi.intensity=0.55;
+  this.sun.intensity=0.35;this.amb.intensity=0.12;this.key.intensity=2.4;
+  this.renderer.toneMappingExposure=1.0;
+  this.scene.fog=new THREE.Fog(0x0c0f18,450,3400)}
 
  // ------------------------------------------------------------- world
  buildWorld(tr:TrackCurve,info:SceneInfo){
-  const n=tr.n,L=tr.length;const lam=(o:THREE.MeshLambertMaterialParameters)=>new THREE.MeshLambertMaterial(o);
+  const n=tr.n,L=tr.length;const lam=(o:THREE.MeshLambertMaterialParameters)=>new THREE.MeshLambertMaterial(o);const P=this.proc;
   let minx=Infinity,maxx=-Infinity,miny=Infinity,maxy=-Infinity,minz=Infinity;
   for(let i=0;i<n;i++){minx=Math.min(minx,tr.x[i]);maxx=Math.max(maxx,tr.x[i]);miny=Math.min(miny,tr.y[i]);maxy=Math.max(maxy,tr.y[i]);minz=Math.min(minz,tr.z[i])}
   const sub:number[]=[];for(let i=0;i<n;i+=6)sub.push(i);
@@ -141,7 +189,7 @@ export class BroadcastEngine{
   terr.computeVertexNormals();
   const env=this.env;
   const grass=env.street?noiseTexture([50,52,56],14,256):noiseTexture([70,96,52],26,256);grass.repeat.set(gw/40,gh/40);
-  this.world.add(new THREE.Mesh(terr,lam({map:grass})));
+  P.add(new THREE.Mesh(terr,lam({map:grass})));
   // Grass verges at track height, sloping down outwards, cut short where another part of the circuit is close.
   const reach=(side:number)=>{const out=new Float32Array(n).fill(HALF+38);
    for(let i=0;i<n;i+=3){let lim=HALF+38;for(let o=HALF+4;o<=HALF+38;o+=4){const x=tr.x[i]-tr.ty[i]*side*o,y=tr.y[i]+tr.tx[i]*side*o;
@@ -151,39 +199,39 @@ export class BroadcastEngine{
    return out};
   const verge=env.street?noiseTexture([66,68,72],10,128):noiseTexture([82,110,60],22,128);   // street: concrete, not grass
   const vMat=lam({map:verge,polygonOffset:true,polygonOffsetFactor:2,polygonOffsetUnits:2});
-  this.world.add(new THREE.Mesh(ribbon(tr,HALF,HALF+38,-0.06,{uLen:20,outer:reach(1),drop:-2.4}),vMat),new THREE.Mesh(ribbon(tr,-HALF-38,-HALF,-0.06,{uLen:20,outer:reach(-1),drop:-2.4}),vMat));
+  P.add(new THREE.Mesh(ribbon(tr,HALF,HALF+38,-0.06,{uLen:20,outer:reach(1),drop:-2.4}),vMat),new THREE.Mesh(ribbon(tr,-HALF-38,-HALF,-0.06,{uLen:20,outer:reach(-1),drop:-2.4}),vMat));
   // Paved run-off just outside the asphalt edges.
   const runMat=lam({color:0x6b7067,polygonOffset:true,polygonOffsetFactor:1,polygonOffsetUnits:1});
-  this.world.add(new THREE.Mesh(ribbon(tr,HALF,HALF+5,-0.03),runMat),new THREE.Mesh(ribbon(tr,-HALF-5,-HALF,-0.03),runMat));
+  P.add(new THREE.Mesh(ribbon(tr,HALF,HALF+5,-0.03),runMat),new THREE.Mesh(ribbon(tr,-HALF-5,-HALF,-0.03),runMat));
   const asphalt=noiseTexture([66,68,72],16,256,0);asphalt.anisotropy=8;
-  this.world.add(new THREE.Mesh(ribbon(tr,-HALF,HALF,0,{uLen:14}),lam({map:asphalt})));
+  P.add(new THREE.Mesh(ribbon(tr,-HALF,HALF,0,{uLen:14}),lam({map:asphalt})));
   const white=lam({color:0xe9ecef});
-  this.world.add(new THREE.Mesh(ribbon(tr,HALF-0.55,HALF-0.3,0.015),white),new THREE.Mesh(ribbon(tr,-HALF+0.3,-HALF+0.55,0.015),white));
+  P.add(new THREE.Mesh(ribbon(tr,HALF-0.55,HALF-0.3,0.015),white),new THREE.Mesh(ribbon(tr,-HALF+0.3,-HALF+0.55,0.015),white));
   // Kerbs where the circuit bends, red and white every 2 m.
   const curv=new Float64Array(n);for(let i=0;i<n;i++){const a=(i-8+n)%n,b=(i+8)%n;let dh=Math.atan2(tr.ty[b],tr.tx[b])-Math.atan2(tr.ty[a],tr.tx[a]);dh=(dh+Math.PI*3)%(Math.PI*2)-Math.PI;curv[i]=dh/32}
   const red=new THREE.Color(0xc4232c),wht=new THREE.Color(0xf1f1ee);
   const kc=(side:number)=>(i:number)=>Math.abs(curv[i])>1/260&&Math.sign(curv[i])*side>0||Math.abs(curv[i])>1/90?(Math.floor(tr.s[i]/2.2)%2?red:wht):null;
   const kMat=lam({vertexColors:true});
-  this.world.add(new THREE.Mesh(ribbon(tr,HALF-0.1,HALF+1.3,0.03,{color:kc(1)}),kMat),new THREE.Mesh(ribbon(tr,-HALF-1.3,-HALF+0.1,0.03,{color:kc(-1)}),kMat));
+  P.add(new THREE.Mesh(ribbon(tr,HALF-0.1,HALF+1.3,0.03,{color:kc(1)}),kMat),new THREE.Mesh(ribbon(tr,-HALF-1.3,-HALF+0.1,0.03,{color:kc(-1)}),kMat));
   // Street circuits run on public roads: dashed lane lines stay painted on the straights.
   if(env.street){const dash=(i:number)=>{for(let q=-20;q<=20;q+=5)if(Math.abs(curv[(i+q+n)%n])>1/700)return null;return Math.floor(tr.s[i]/3)%4===0?wht:null};
-   const lm=lam({vertexColors:true});for(const o of [-HALF/3,HALF/3])this.world.add(new THREE.Mesh(ribbon(tr,o-0.08,o+0.08,0.012,{color:dash}),lm))}
+   const lm=lam({vertexColors:true});for(const o of [-HALF/3,HALF/3])P.add(new THREE.Mesh(ribbon(tr,o-0.08,o+0.08,0.012,{color:dash}),lm))}
   // Start/finish line and gantry.
   const p0=tr.at(0),nx=-Math.sin(p0.h),ny=Math.cos(p0.h);
-  const line=new THREE.Mesh(new THREE.PlaneGeometry(1.0,HALF*2),lam({color:0xffffff}));line.rotation.set(-Math.PI/2,0,p0.h);line.position.copy(W(p0.x,p0.y,p0.z+0.02));this.world.add(line);
+  const line=new THREE.Mesh(new THREE.PlaneGeometry(1.0,HALF*2),lam({color:0xffffff}));line.rotation.set(-Math.PI/2,0,p0.h);line.position.copy(W(p0.x,p0.y,p0.z+0.02));P.add(line);
   const gmat=lam({color:0x2b3138});
-  for(const s of [-1,1]){const post=new THREE.Mesh(new THREE.BoxGeometry(0.6,9,0.6),gmat);post.position.copy(W(p0.x+nx*(HALF+2.5)*s,p0.y+ny*(HALF+2.5)*s,p0.z+4.5));this.world.add(post)}
-  const beam=new THREE.Mesh(new THREE.BoxGeometry(1.2,1.6,HALF*2+5.6),gmat);beam.position.copy(W(p0.x,p0.y,p0.z+8.6));beam.rotation.y=p0.h;this.world.add(beam);
+  for(const s of [-1,1]){const post=new THREE.Mesh(new THREE.BoxGeometry(0.6,9,0.6),gmat);post.position.copy(W(p0.x+nx*(HALF+2.5)*s,p0.y+ny*(HALF+2.5)*s,p0.z+4.5));P.add(post)}
+  const beam=new THREE.Mesh(new THREE.BoxGeometry(1.2,1.6,HALF*2+5.6),gmat);beam.position.copy(W(p0.x,p0.y,p0.z+8.6));beam.rotation.y=p0.h;P.add(beam);
   const chk=document.createElement('canvas');chk.width=64;chk.height=8;const cx=chk.getContext('2d')!;for(let i=0;i<16;i++)for(let j=0;j<2;j++){cx.fillStyle=(i+j)%2?'#111':'#eee';cx.fillRect(i*4,j*4,4,4)}
   const ct=new THREE.CanvasTexture(chk);ct.magFilter=THREE.NearestFilter;const band=new THREE.Mesh(new THREE.PlaneGeometry(HALF*2+5,1.2),new THREE.MeshBasicMaterial({map:ct,side:THREE.DoubleSide}));
-  band.position.copy(W(p0.x,p0.y,p0.z+8.6));band.rotation.y=p0.h+Math.PI/2;band.translateZ(0.62);this.world.add(band);
+  band.position.copy(W(p0.x,p0.y,p0.z+8.6));band.rotation.y=p0.h+Math.PI/2;band.translateZ(0.62);P.add(band);
   // Pit lane: measured path (recorded mode) or drawn beside the outline (estimated; no cars are moved along it).
   let pit:{x:number;y:number;z:number}[]=[];
   if(info.track.pit?.length){pit=info.track.pit.map(([x,y])=>{const q=tr.nearest(x,y);return {x,y,z:tr.z[q.i]}})}
   else if(info.track.pit_frac){const {entry,exit}=info.track.pit_frac;const len=((exit-entry)%1+1)%1;const mid=tr.at((entry+len/2)*L);
    const side=((mid.x-(minx+maxx)/2)*-Math.sin(mid.h)+(mid.y-(miny+maxy)/2)*Math.cos(mid.h))>0?-1:1;
    for(let k=0;k<=120;k++){const t=k/120,d=(entry+len*t)*L,p=tr.at(d);const e=Math.min(1,t/.12,(1-t)/.12),s=e*e*(3-2*e);pit.push({x:p.x-Math.sin(p.h)*side*16*s,y:p.y+Math.cos(p.h)*side*16*s,z:p.z})}}
-  if(pit.length>2)this.world.add(new THREE.Mesh(polyRibbon(pit,5,-0.01),lam({color:0x55585d,polygonOffset:true,polygonOffsetFactor:-1})));
+  if(pit.length>2)P.add(new THREE.Mesh(polyRibbon(pit,5,-0.01),lam({color:0x55585d,polygonOffset:true,polygonOffsetFactor:-1})));
   const nearPit=(x:number,y:number,r:number)=>pit.some(p=>(p.x-x)**2+(p.y-y)**2<r*r);
   // Barriers with posts every 6 m (they give the sense of speed), left out where the pit lane passes.
   // Street circuits: concrete walls a few metres from the asphalt with catch fences on top; elsewhere wide run-off.
@@ -197,29 +245,29 @@ export class BroadcastEngine{
     for(const [p,u,v] of [[f0,u0,0],[g0,u1,0],[g1,u1,1],[f0,u0,0],[g1,u1,1],[f1,u0,1]] as [THREE.Vector3,number,number][]){fence.push(p.x,p.y,p.z);fenceUv.push(u,v)}}
    if(i%(env.street?2:3)===0){const back=env.street?0.25:1.2;postM.push(new THREE.Matrix4().makeTranslation(...W(ax-tr.ty[i]*side*back,ay+tr.tx[i]*side*back,tr.z[i]+2.2).toArray() as [number,number,number]))}}}
   const bg=new THREE.BufferGeometry();bg.setAttribute('position',new THREE.Float32BufferAttribute(barPos,3));bg.computeVertexNormals();
-  this.world.add(new THREE.Mesh(bg,lam({color:env.street?0xd8dbde:0xc9ced3,side:THREE.DoubleSide})));
+  P.add(new THREE.Mesh(bg,lam({color:env.street?0xd8dbde:0xc9ced3,side:THREE.DoubleSide})));
   if(fence.length){const c=document.createElement('canvas');c.width=c.height=32;const x=c.getContext('2d')!;x.strokeStyle='rgba(40,46,54,.9)';x.lineWidth=2;
    for(let k=-32;k<64;k+=8){x.beginPath();x.moveTo(k,0);x.lineTo(k+32,32);x.stroke();x.beginPath();x.moveTo(k+32,0);x.lineTo(k,32);x.stroke()}
    const ft=new THREE.CanvasTexture(c);ft.wrapS=ft.wrapT=THREE.RepeatWrapping;ft.repeat.set(1,6);ft.anisotropy=4;
    const fg=new THREE.BufferGeometry();fg.setAttribute('position',new THREE.Float32BufferAttribute(fence,3));fg.setAttribute('uv',new THREE.Float32BufferAttribute(fenceUv,2));fg.computeVertexNormals();
-   this.world.add(new THREE.Mesh(fg,new THREE.MeshLambertMaterial({map:ft,transparent:true,alphaTest:0.2,side:THREE.DoubleSide,depthWrite:false})))}
-  const posts=new THREE.InstancedMesh(new THREE.BoxGeometry(0.14,4.6,0.14),lam({color:0x3a4048}),postM.length);postM.forEach((m,i)=>posts.setMatrixAt(i,m));this.world.add(posts);
+   P.add(new THREE.Mesh(fg,new THREE.MeshLambertMaterial({map:ft,transparent:true,alphaTest:0.2,side:THREE.DoubleSide,depthWrite:false})))}
+  const posts=new THREE.InstancedMesh(new THREE.BoxGeometry(0.14,4.6,0.14),lam({color:0x3a4048}),postM.length);postM.forEach((m,i)=>posts.setMatrixAt(i,m));P.add(posts);
   // Floodlight poles (street circuits and night races): every ~45 m, alternating sides, lamps reaching over the track.
   if(env.street||env.night){const poleM:THREE.Matrix4[]=[],lampM:THREE.Matrix4[]=[];const lo=bar+(env.street?1.2:2);
    for(let i=0,k=0;i<n;i+=22,k++){const side=k%2?1:-1;const ax=tr.x[i]-tr.ty[i]*side*lo,ay=tr.y[i]+tr.tx[i]*side*lo;if(nearPit(ax,ay,12)||nearTrack(ax,ay).d<lo-3)continue;
     poleM.push(new THREE.Matrix4().makeTranslation(...W(ax,ay,tr.z[i]+6).toArray() as [number,number,number]));
     const lx=tr.x[i]-tr.ty[i]*side*(lo-2.2),ly=tr.y[i]+tr.tx[i]*side*(lo-2.2);
     lampM.push(new THREE.Matrix4().compose(W(lx,ly,tr.z[i]+12),new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),Math.atan2(tr.ty[i],tr.tx[i])),new THREE.Vector3(1,1,1)))}
-   const poles=new THREE.InstancedMesh(new THREE.BoxGeometry(0.3,12,0.3),lam({color:0x4a5058}),poleM.length);poleM.forEach((m,i)=>poles.setMatrixAt(i,m));this.world.add(poles);
-   const lamps=new THREE.InstancedMesh(new THREE.BoxGeometry(1.0,0.3,4.6),new THREE.MeshBasicMaterial({color:env.night?0xfff6e0:0xcfd4da}),lampM.length);lampM.forEach((m,i)=>lamps.setMatrixAt(i,m));this.world.add(lamps)}
+   const poles=new THREE.InstancedMesh(new THREE.BoxGeometry(0.3,12,0.3),lam({color:0x4a5058}),poleM.length);poleM.forEach((m,i)=>poles.setMatrixAt(i,m));P.add(poles);
+   const lamps=new THREE.InstancedMesh(new THREE.BoxGeometry(1.0,0.3,4.6),new THREE.MeshBasicMaterial({color:env.night?0xfff6e0:0xcfd4da}),lampM.length);lampM.forEach((m,i)=>lamps.setMatrixAt(i,m));P.add(lamps)}
   // Grandstands along the main straight, on the side away from the pit lane.
   const standSide=pit.length&&pit[Math.floor(pit.length/2)]?(()=>{const p=pit[Math.floor(pit.length/2)];const q=tr.nearest(p.x,p.y);return ((p.x-tr.x[q.i])*-tr.ty[q.i]+(p.y-tr.y[q.i])*tr.tx[q.i])>0?-1:1})():-1;
   const sMat=lam({color:0x4b5463}),seat=lam({color:0x34507a});
   for(let d=-260;d<=360;d+=44){const p=tr.at((d+L)%L);const o=standSide*(HALF+30);const cx2=p.x-Math.sin(p.h)*o,cy2=p.y+Math.cos(p.h)*o;
    if(nearTrack(cx2,cy2).d<HALF+20||nearPit(cx2,cy2,14))continue;
    for(let k=0;k<3;k++){const b=new THREE.Mesh(new THREE.BoxGeometry(40,3.2+k*3.2,8),k?seat:sMat);const off=standSide*(k*7);
-    b.position.copy(W(cx2-Math.sin(p.h)*off,cy2+Math.cos(p.h)*off,p.z+1.6*(k+1)));b.rotation.y=p.h;this.world.add(b)}
-   const roof=new THREE.Mesh(new THREE.BoxGeometry(42,0.5,24),sMat);roof.position.copy(W(cx2-Math.sin(p.h)*standSide*8,cy2+Math.cos(p.h)*standSide*8,p.z+13));roof.rotation.y=p.h;this.world.add(roof)}
+    b.position.copy(W(cx2-Math.sin(p.h)*off,cy2+Math.cos(p.h)*off,p.z+1.6*(k+1)));b.rotation.y=p.h;P.add(b)}
+   const roof=new THREE.Mesh(new THREE.BoxGeometry(42,0.5,24),sMat);roof.position.copy(W(cx2-Math.sin(p.h)*standSide*8,cy2+Math.cos(p.h)*standSide*8,p.z+13));roof.rotation.y=p.h;P.add(roof)}
   // Braking boards (3-2-1) before the slow corners.
   const boardTex=[3,2,1].map(k=>{const c=document.createElement('canvas');c.width=64;c.height=96;const x=c.getContext('2d')!;x.fillStyle='#f4f4f2';x.fillRect(0,0,64,96);
    x.fillStyle='#1b1f24';for(let s=0;s<k;s++)x.fillRect(10,14+s*26,44,14);const t=new THREE.CanvasTexture(c);t.colorSpace=THREE.SRGBColorSpace;return t});
@@ -227,7 +275,7 @@ export class BroadcastEngine{
    let start=b;for(let k=0;k<160;k++){const q=(i-k+n)%n;if(sp[(q+n-1)%n]<=sp[q]+0.002){start=q;break}}
    const side=curv[i]>0?-1:1;
    [150,100,50].forEach((m,k)=>{const p=tr.at(tr.s[start]-m);const o=side*(HALF+6);const bd=new THREE.Mesh(new THREE.PlaneGeometry(1.4,2.1),lam({map:boardTex[k],side:THREE.DoubleSide}));
-    bd.position.copy(W(p.x-Math.sin(p.h)*o,p.y+Math.cos(p.h)*o,p.z+1.3));bd.rotation.y=p.h+Math.PI/2;this.world.add(bd)})}}
+    bd.position.copy(W(p.x-Math.sin(p.h)*o,p.y+Math.cos(p.h)*o,p.z+1.3));bd.rotation.y=p.h+Math.PI/2;P.add(bd)})}}
   // Trees and a distant skyline for depth (generic, procedural).
   const r=rng(Math.round(L));const treeM:THREE.Matrix4[]=[],bldM:THREE.Matrix4[]=[];
   for(let k=0;k<2600&&treeM.length<700&&!env.street;k++){const x=minx-300+r()*(maxx-minx+600),y=miny-300+r()*(maxy-miny+600);const q=nearTrack(x,y);if(q.d<HALF+42||q.d>260||nearPit(x,y,25))continue;
@@ -239,14 +287,37 @@ export class BroadcastEngine{
    const h=14+r()*r()*150,w=16+r()*34;bldM.push(new THREE.Matrix4().compose(W(x,y,q.low-1+h/2),new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),r()*3),new THREE.Vector3(w,h,w*(.6+r()*.8))))}
   for(let k=0;k<3000&&bldM.length<(env.street?900:420);k++){const x=minx-pad+r()*(gw),y=miny-pad+r()*(gh);const q=nearTrack(x,y);if(q.d<420)continue;
    const h=12+r()*r()*90,w=18+r()*30;bldM.push(new THREE.Matrix4().compose(W(x,y,zmean-1+h/2),new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),r()*3),new THREE.Vector3(w,h,w*(.6+r()*.8))))}
-  const trees=new THREE.InstancedMesh(new THREE.ConeGeometry(3.4,10,7),lam({color:0x2f4a2a}),treeM.length);treeM.forEach((m,i)=>trees.setMatrixAt(i,m));this.world.add(trees);
+  const trees=new THREE.InstancedMesh(new THREE.ConeGeometry(3.4,10,7),lam({color:0x2f4a2a}),treeM.length);treeM.forEach((m,i)=>trees.setMatrixAt(i,m));P.add(trees);
   // Facades with windows; lit at night (generic, no real buildings or signs).
   const wc=document.createElement('canvas');wc.width=64;wc.height=128;const wx=wc.getContext('2d')!;const wr=rng(7);
   wx.fillStyle=env.night?'#161b25':'#9aa3ad';wx.fillRect(0,0,64,128);
   for(let yy=4;yy<124;yy+=8)for(let xx=4;xx<60;xx+=8){const lit=wr();wx.fillStyle=env.night?(lit<.45?['#ffd9a0','#cfe3ff','#ffc28a','#f6a6ff'][Math.floor(wr()*4)]:'#0d1118'):(lit<.5?'#5d6874':'#7c8792');wx.fillRect(xx,yy,4,5)}
   const wt=new THREE.CanvasTexture(wc);wt.colorSpace=THREE.SRGBColorSpace;wt.wrapS=wt.wrapT=THREE.RepeatWrapping;wt.repeat.set(1,3);
-  const blds=new THREE.InstancedMesh(new THREE.BoxGeometry(1,1,1),lam(env.night?{map:wt,emissiveMap:wt,emissive:new THREE.Color(0xffffff),emissiveIntensity:0.85}:{map:wt}),bldM.length);bldM.forEach((m,i)=>blds.setMatrixAt(i,m));this.world.add(blds);
+  const blds=new THREE.InstancedMesh(new THREE.BoxGeometry(1,1,1),lam(env.night?{map:wt,emissiveMap:wt,emissive:new THREE.Color(0xffffff),emissiveIntensity:0.85}:{map:wt}),bldM.length);bldM.forEach((m,i)=>blds.setMatrixAt(i,m));this.far.add(blds);
  }
+
+ /** Venue scenes: trackside cameras just behind the debris fence on the outside of each bend (or the grandstand side of
+  * the straight), raised above the fence, moved until nothing in the venue blocks the view of the track in front. */
+ venueSites(tr:TrackCurve,v:Venue):Site[]{
+  const out:Site[]=[];const n=tr.n,L=tr.length;const count=Math.max(8,Math.round(L/280));const ray=new THREE.Raycaster();
+  const meshes:THREE.Object3D[]=[];const boxes:THREE.Box3[]=[];
+  v.root.traverse(o=>{const m=o as THREE.Mesh;if(!m.isMesh||/fence|horizon|fence_posts|brake/.test(o.name))return;meshes.push(o);   // floodlight poles count (instanced)
+   if(/^(grandstand|pit_building|building|stand|bleachers|gantry)/.test(o.name)){const bx=new THREE.Box3().setFromObject(o);if(bx.getSize(new THREE.Vector3()).length()<900)boxes.push(bx.expandByScalar(4))}});
+  this.occluders=meshes;
+  const poles=v.manifest.instances.poles.map(q=>v.toScene(q[0],q[1]));   // floodlight poles: keep 9 m clear of the lens
+  for(let k=0;k<count;k++){const d=(k+0.5)*L/count;const i=Math.floor(d/L*n)%n;
+   const a=(i-20+n)%n,b=(i+20)%n;let dh=Math.atan2(tr.ty[b],tr.tx[b])-Math.atan2(tr.ty[a],tr.tx[a]);dh=(dh+Math.PI*3)%(Math.PI*2)-Math.PI;
+   const pref=Math.abs(dh)>0.12?-Math.sign(dh):1;let best:THREE.Vector3|null=null;
+   const tgt=W(tr.x[(i+15)%n],tr.y[(i+15)%n],tr.z[(i+15)%n]+0.8);
+   for(const side of [pref,-pref])for(const off of [14,20,28,38])for(const h of [7,11,16]){if(best)break;
+    const x=tr.x[i]-tr.ty[i]*side*off,y=tr.y[i]+tr.tx[i]*side*off;if(tr.nearest(x,y).dist<off-3)continue;
+    const p=W(x,y,v.heightAt(x,y)+h);let clear=!boxes.some(bx=>bx.containsPoint(p))&&!poles.some(q=>(q.x-x)**2+(q.y-y)**2<9*9);
+    // sight lines to the track 50 m either side and straight across, and nothing within 4 m of the lens (roof masts)
+    for(const q of [(i-25+n)%n,(i+15)%n,(i+40)%n]){const t2=W(tr.x[q],tr.y[q],tr.z[q]+0.8);const dir=t2.sub(p);const len=dir.length();ray.set(p,dir.normalize());ray.far=len*0.97;if(ray.intersectObjects(meshes,false).length){clear=false;break}}
+    for(let a2=0;clear&&a2<8;a2++){ray.set(p,new THREE.Vector3(Math.cos(a2*Math.PI/4),0,Math.sin(a2*Math.PI/4)));ray.far=4;if(ray.intersectObjects(meshes,false).length)clear=false}
+    if(clear)best=p}
+   out.push({i,d:tr.s[i],pos:best||W(tr.x[i],tr.y[i],tr.z[i]+30),name:`CAM ${k+1}`})}
+  return out}
 
  /** Fixed trackside camera positions, every ~300 m, on the outside of the bends, raised a few metres. */
  buildSites(tr:TrackCurve):Site[]{
@@ -296,9 +367,20 @@ export class BroadcastEngine{
   if(!sel||!info.drivers[sel]){auto=true;let best=99;if(buf||this.external)for(const num of Object.keys(info.drivers)){const t=this.timingOf(num,D,buf);if(t?.pos&&t.pos<best&&!t.out){best=t.pos;sel=num}}}
   for(const [num,car] of this.cars){const p=all.get(num);const t=this.timingOf(num,D,buf);
    if(!p||t?.retired&&p.flag==='stale'){car.group.visible=false;continue}
-   car.group.visible=true;car.group.position.copy(W(p.x,p.y,p.z));
-   const ahead=tr.at(p.d+3),behind=tr.at(p.d-3);car.group.rotation.set(0,p.h,p.offTrack?0:Math.atan2(ahead.z-behind.z,6));
-   const spin=-(p.d%1000)/0.36;for(const w of car.wheels)w.rotation.z=spin;
+   car.group.visible=true;
+   const vz=this.venue?this.venue.heightAt(p.x,p.y,num):null;
+   car.group.position.copy(W(p.x,p.y,vz??p.z));
+   const ahead=tr.at(p.d+3),behind=tr.at(p.d-3);
+   let pitch=p.offTrack?0:Math.atan2(ahead.z-behind.z,6);
+   if(this.venue&&!p.offTrack){const fx=Math.cos(p.h)*3,fy=Math.sin(p.h)*3;pitch=Math.atan2(this.venue.heightAt(p.x+fx,p.y+fy)-this.venue.heightAt(p.x-fx,p.y-fy),6)}
+   car.group.rotation.set(0,p.h,pitch);
+   if(isDetailed(car)){car.wheels.forEach((w,k)=>{w.rotation.z=-(p.d%2000)/(car.radii[k]||0.355)});
+    // steer with the circuit's curvature at this point (the feed has no steering data)
+    const a2=tr.at(p.d+6),b2=tr.at(p.d-6);let dh=a2.h-b2.h;dh=(dh+Math.PI*3)%(Math.PI*2)-Math.PI;const st=THREE.MathUtils.clamp(Math.atan(3.4*dh/12)*1.15,-0.35,0.35);
+    for(const s of car.steer)s.rotation.y=st;
+    const dist=car.group.position.distanceTo(this.camera.position);const hi=dist<70||(num===sel&&this.mode!=='broadcast');
+    if(car.lod[0])car.lod[0].visible=hi;if(car.lod[1])car.lod[1].visible=!hi}
+   else{const spin=-(p.d%1000)/0.36;for(const w of car.wheels)w.rotation.z=spin}
    const own=num===sel&&this.mode!=='broadcast';car.helmet.visible=!(own&&this.mode==='cockpit');car.label.visible=!own;
    const tag=`${t?.pos??''}|${p.flag}`;if(this.labels.get(num)!==tag){this.labels.set(num,tag);const m=info.drivers[num];
     (car.label.material as THREE.SpriteMaterial).map?.dispose();(car.label.material as THREE.SpriteMaterial).map=labelTexture(m.code,m.color,t?.pos);
@@ -315,6 +397,10 @@ export class BroadcastEngine{
   const me=sel?all.get(sel):undefined;
   if(me)this.lastSel=me;
   this.placeCamera(me||null,all,sel,tr,now);
+  if(this.venue){this.venue.updateLod(this.camera.position);
+   const f=me?W(me.x,me.y,this.venue.heightAt(me.x,me.y,me.num)):this.camera.position.clone();
+   this.key.target.position.copy(f);this.key.position.copy(f).add(new THREE.Vector3(-34,62,22));this.key.target.updateMatrixWorld()}
+  const dtf=now-this.lastFrame;this.lastFrame=now;if(dtf>0&&dtf<1000){this.frameTimes.push(dtf);if(this.frameTimes.length>600)this.frameTimes.shift()}
   for(const [,car] of this.cars)if(car.group.visible&&car.label.visible){const dist=car.group.position.distanceTo(this.camera.position);car.label.visible=dist<520;
    // Roughly constant size on screen: small on a car just ahead, readable far away.
    const s=THREE.MathUtils.clamp(dist*Math.tan(THREE.MathUtils.degToRad(this.camera.fov/2))/(this.mode==='broadcast'?14:16),0.2,8);car.label.scale.set(2.6*s,0.98*s,1);
@@ -328,14 +414,16 @@ export class BroadcastEngine{
   if(!me){const p=this.lastSel;if(!p&&!this.camReady){const c=tr.at(0);cam.position.copy(W(c.x,c.y,c.z+60));cam.lookAt(W(c.x+Math.cos(c.h)*120,c.y+Math.sin(c.h)*120,c.z));this.camReady=true}return}
   if(this.mode==='broadcast'){this.broadcastCam(me,all,tr,now);return}
   const car=this.cars.get(me.num)!;const cockpit=this.mode==='cockpit';
-  const eye=car.group.localToWorld(cockpit?new THREE.Vector3(0.0,0.87,0):new THREE.Vector3(-0.74,1.31,0));
+  const mount=isDetailed(car)?(cockpit?car.mounts.cockpit:car.mounts.pod).clone():cockpit?new THREE.Vector3(0.0,0.87,0):new THREE.Vector3(-0.74,1.31,0);
+  const eye=car.group.localToWorld(mount);
   const ahead=tr.at(me.d+(cockpit?22:35));const fwd=new THREE.Vector3(Math.cos(me.h),0,-Math.sin(me.h));
   const toPath=W(ahead.x,ahead.y,ahead.z).sub(eye).setY(0).normalize();
   const want=fwd.clone().lerp(me.offTrack?fwd:toPath,cockpit?0.45:0.3).normalize();
   if(!this.camReady){this.camDir.copy(want);this.camReady=true}else this.camDir.lerp(want,1-Math.exp(-dt/(cockpit?0.14:0.09))).normalize();
-  const fov=cockpit?64:46;if(cam.fov!==fov||cam.near!==0.02){cam.fov=fov;cam.near=0.02;cam.updateProjectionMatrix()}
+  const fov=cockpit?(isDetailed(car)?54:64):46;if(cam.fov!==fov||cam.near!==0.02){cam.fov=fov;cam.near=0.02;cam.updateProjectionMatrix()}
   cam.position.copy(eye);
   const dist=cockpit?25:35;const tgt=eye.clone().add(this.camDir.clone().multiplyScalar(dist));tgt.y=ahead.z+(cockpit?0.15:0.05);
+  if(isDetailed(car)&&!me.offTrack){const road=eye.y-mount.y;tgt.y=cockpit?road+mount.y-dist*Math.tan(THREE.MathUtils.degToRad(3.5)):road+mount.y-dist*Math.tan(THREE.MathUtils.degToRad(6.5))}   // T-cam and helmet pitch (from onboard footage)
   if(me.offTrack)tgt.y=eye.y-(cockpit?0.3:0.9);
   cam.lookAt(tgt);
  }
@@ -350,6 +438,11 @@ export class BroadcastEngine{
   let cut=false;
   if(this.site<0||!sites[this.site]){this.site=pick();cut=true}
   else{const s=sites[this.site];const x=rel(s);const out=!inWin(s);if(out||(x<-90&&now-this.cutAt>3000)){const nx=pick();if(nx!==this.site){this.site=nx;cut=true}}}
+  // Venue scenes: never stay on a camera whose view of the car is blocked (stands, poles, the gantry).
+  if(this.venue&&this.occluders.length&&(cut||now-this.occCheck>500)){this.occCheck=now;
+   const blocked=(k:number)=>{const p=sites[k].pos,t=W(me.x,me.y,me.z+0.7);const d=t.clone().sub(p);const len=d.length();this.ray.set(p,d.normalize());this.ray.far=len-3;return this.ray.intersectObjects(this.occluders,false).length>0};
+   if(blocked(this.site)){const order=sites.map((s,k)=>k).filter(k=>k!==this.site&&inWin(sites[k])).sort((a,b)=>rel(sites[b])-rel(sites[a]));
+    const alt=order.find(k=>!blocked(k));if(alt!==undefined){this.site=alt;cut=true}}}
   if(cut){this.cutAt=now;this.lookReady=false}
   const site=sites[this.site];
   // Battle: another car physically close on track fits naturally in the same frame.
@@ -375,6 +468,8 @@ export class BroadcastEngine{
   this.onHud({elapsed:Number.isFinite(D)&&this.feed?.start?D-this.feed.start:null,utc:Number.isFinite(D)?D:null,num:sel,auto,code:m?.code||'',name:m?.name||'',team:m?.team||'',color:m?.color||'#62d7da',
    timing:sel?this.timingOf(sel,D,buf):null,totalLaps:info.total_laps,ahead:nm(nb.ahead),behind:nm(nb.behind),flag:p?p.flag:'none',
    cam:this.mode==='broadcast'&&this.site>=0?this.sites[this.site]?.name||'':'',battle:this.mode==='broadcast'&&this.battle?info.drivers[this.battle]?.code||null:null,
-   buffering:!buf,error:this.fetchErr,onTrack,ghosted:this.ghosted});
+   buffering:!buf,error:this.fetchErr,onTrack,ghosted:this.ghosted,venue:this.venueState,
+   models:{count:[...this.cars.values()].filter(isDetailed).length,preview:this.preview,previewAvailable:previewAvailable(Object.values(info.drivers).map(d=>d.team),info.session?.year),
+    labels:[...new Set([...this.cars.values()].filter(isDetailed).map(c=>(c as DetailedCar).model))]}});
  }
 }

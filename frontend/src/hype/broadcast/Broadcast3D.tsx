@@ -23,6 +23,7 @@ export default function Broadcast3D({feed,focus,onFocus,rows,fallback,api=LIVE_A
  const [pref,setPref]=useState(()=>store.get('source','auto'));
  const [info,setInfo]=useState<SceneInfo|null>(null),[sceneErr,setSceneErr]=useState(''),[retry,setRetry]=useState(0);
  const [hud,setHud]=useState<Hud|null>(null);
+ const [preview,setPreview]=useState(()=>store.get('preview-models','0')==='1');
 
  useEffect(()=>{if(!host.current)return;let e:BroadcastEngine;
   try{e=new BroadcastEngine(host.current,h=>setHud(h))}catch(x){setGlErr('This browser could not start WebGL, so the 3D view is off. The 2D map below still works.');return}
@@ -46,6 +47,7 @@ export default function Broadcast3D({feed,focus,onFocus,rows,fallback,api=LIVE_A
  useEffect(()=>{eng.current?.setFeed(feed)},[feed]);
  useEffect(()=>{eng.current?.setFocus(focus)},[focus]);
  useEffect(()=>{eng.current?.setMode(mode);store.set('camera',mode)},[mode]);
+ useEffect(()=>{eng.current?.setPreview(preview);store.set('preview-models',preview?'1':'0')},[preview]);
 
  const unavailable=glErr||(info&&!info.ok&&!info.loading?(info.error||'No circuit geometry for this session.'):'');
  const t=hud?.timing;const lap=t?(hud!.totalLaps?`${Math.min(hud!.totalLaps,t.laps+1)}/${hud!.totalLaps}`:`${t.laps}`):'—';
@@ -74,9 +76,11 @@ export default function Broadcast3D({feed,focus,onFocus,rows,fallback,api=LIVE_A
      <small className="clock">{hud?.elapsed!=null?feed.exact?`${hms(hud.elapsed)} into the session`:`${hms(hud.elapsed)} into the recording · ${utc(hud.utc)}`:''}</small>
      {recBusy&&<small>Loading recorded positions… {Math.round((info!.recorded.progress||0)*100)}%</small>}
     </div>
+    {hud?.models.preview&&hud.models.count>0&&<div className="rhx-b3d-preview-tag" role="note">Preview · 2026 car shapes ({hud.models.labels.map(l=>l.toUpperCase()).join(' / ')}) on {info?.session?.year||'this'} session data</div>}
     {hud?.cam&&<div className="rhx-b3d-camtag">{hud.cam}{hud.battle&&<> · battle with {hud.battle}</>}</div>}
     {status&&<p className="rhx-b3d-status" role="status">{status}</p>}
-    <p className="rhx-b3d-legal">Unofficial fan view, not affiliated with Formula 1. Generic car model.</p>
+    <p className="rhx-b3d-legal">Unofficial fan view, not affiliated with Formula 1. {hud?.models.count?'Mercedes W17 / Red Bull RB22 shapes modelled from public photos, no team logos; other teams use the generic car.':'Generic car model.'}
+     {hud?.venue?.status==='ready'?' Circuit modelled from OpenStreetMap (© OpenStreetMap contributors) and FIA data.':''}</p>
    </>}
   </div>
   <div className="rhx-b3d-bar">
@@ -88,7 +92,10 @@ export default function Broadcast3D({feed,focus,onFocus,rows,fallback,api=LIVE_A
    {info?.recorded?.status==='ready'&&<div className="rhx-seg is-inline" role="group" aria-label="Positions">
     {[['auto','Recorded'],['estimated','Estimated']].map(([k,l])=><button type="button" key={k} className={pref===k?'on':''} aria-pressed={pref===k} onClick={()=>{setPref(k);store.set('source',k)}}>{l}</button>)}
    </div>}
+   {hud?.models.previewAvailable&&<button type="button" className={'rhx-b3d-previewbtn'+(preview?' on':'')} aria-pressed={preview} onClick={()=>setPreview(v=>!v)}
+    title="Show the 2026 W17 / RB22 models on this session's Mercedes and Red Bull cars, labelled as a preview">Preview 2026 cars</button>}
    <small className="rhx-b3d-detail">{info?.ok?<>{info.detail}. Circuit: {info.track.source}.</>:sceneErr?`Scene: ${sceneErr}`:''}
+    {hud?.venue&&<> Venue: {hud.venue.status==='loading'?'loading the circuit model…':hud.venue.status==='ready'&&hud.venue.align?`${hud.venue.name} model, ${hud.venue.align.mode==='exact'?'placed from the session frame':'fitted to the session'} (median ${hud.venue.align.median.toFixed(1)} m to this lap)`:hud.venue.why}.</>}
     {info?.recorded?.status==='unavailable'&&info.recorded.reason?<> {info.recorded.reason}</>:null}</small>
   </div>
  </section>;

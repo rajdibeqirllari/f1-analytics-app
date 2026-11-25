@@ -64,7 +64,12 @@ def _resample_closed(x, y, z=None, step: float = STEP_M):
 class Track:
     """Closed centreline at ~2 m spacing, index 0 = finish line, in driving order."""
 
-    def __init__(self, x, y, z, source: str, pit: list[list[float]] | None = None, pit_frac: dict | None = None):
+    def __init__(self, x, y, z, source: str, pit: list[list[float]] | None = None, pit_frac: dict | None = None,
+                 frame: tuple | None = None, edges: tuple | None = None):
+        """frame: (dx, dy, dz) when the scene is the F1 position frame (OpenF1 / FastF1 x, y, z in metres) minus this
+        offset, so venue models in that frame can be placed exactly; None when unknown (rotated outlines).
+        edges: (x, y, left, right) asphalt half-widths measured along a reference centreline; the racing line then stays
+        inside the real edges instead of a fixed +-LINE_HALF_WIDTH corridor."""
         x, y, z, length = _resample_closed(x, y, z)
         x, y = _smooth_closed(x, 5), _smooth_closed(y, 5)
         z = _smooth_closed(z, 25)
@@ -75,8 +80,14 @@ class Track:
         self.source = source
         self.pit = pit
         self.pit_frac = pit_frac
+        self.frame = tuple(round(float(v), 3) for v in frame) if frame is not None else None
+        lo = hi = None
+        if edges is not None:
+            ex, ey, el, er = (np.asarray(a, float) for a in edges)
+            idx = np.argmin((x[:, None] - ex[None, :]) ** 2 + (y[:, None] - ey[None, :]) ** 2, axis=1)
+            hi, lo = el[idx] - 1.3, -(er[idx] - 1.3)     # car centre at least 1.3 m inside the edge
         # A typical racing line (same for every car): wide on entry, clipping the apex, wide on exit.
-        self.line = racing_line(x, y, LINE_HALF_WIDTH)
+        self.line = racing_line(x, y, LINE_HALF_WIDTH, lo=lo, hi=hi)
         tx, ty = _tangents(x, y)
         self.profile = speed_profile(x - ty * self.line, y + tx * self.line)   # cumulative profile-time fraction (0..1)
 
@@ -98,7 +109,7 @@ class Track:
         r = lambda a: np.round(a, 2).tolist()
         # Ship every second point (~4 m); the browser smooths it again.
         return dict(x=r(self.x[::2]), y=r(self.y[::2]), z=r(self.z[::2]), length=round(self.length, 1),
-                    source=self.source, pit=self.pit, pit_frac=self.pit_frac, line=np.round(self.line[::2], 2).tolist(),
+                    source=self.source, pit=self.pit, pit_frac=self.pit_frac, frame=self.frame, line=np.round(self.line[::2], 2).tolist(),
                     speed=np.round(self._speeds()[::2], 1).tolist())
 
     def _speeds(self) -> np.ndarray:
@@ -116,7 +127,7 @@ def _tangents(x: np.ndarray, y: np.ndarray):
     return dx / length, dy / length
 
 
-def racing_line(x: np.ndarray, y: np.ndarray, half: float) -> np.ndarray:
+def racing_line(x: np.ndarray, y: np.ndarray, half: float, lo=None, hi=None) -> np.ndarray:
     """Lateral offset (m, left positive) of a smooth line through the corridor of +-half around the centreline.
 
     Minimises the line's curvature (fourth differences over a 16 m stencil) while keeping it inside the track:
@@ -130,7 +141,7 @@ def racing_line(x: np.ndarray, y: np.ndarray, half: float) -> np.ndarray:
         px, py = x + nx * off, y + ny * off
         d4x = r(px, 2 * k) - 4 * r(px, k) + 6 * px - 4 * r(px, -k) + r(px, -2 * k)
         d4y = r(py, 2 * k) - 4 * r(py, k) + 6 * py - 4 * r(py, -k) + r(py, -2 * k)
-        off = np.clip((px - 0.1 * d4x - x) * nx + (py - 0.1 * d4y - y) * ny, -half, half)
+        off = np.clip((px - 0.1 * d4x - x) * nx + (py - 0.1 * d4y - y) * ny, -half if lo is None else lo, half if hi is None else hi)
     return _smooth_closed(off, 5)
 
 
@@ -180,13 +191,23 @@ def _bundled_outline(event: str) -> dict | None:
 
 
 def track_from_outline(outline: dict) -> Track:
-    """A 2D outline (bundled or the engine's) in metres, flat: the outline has no elevation."""
+    """An outline (bundled or the engine's) in metres. Flat unless it carries `z` (metres). An outline marked
+    `frame: "f1"` is in the F1 position frame (tenths of a metre, unrotated), so the scene keeps that offset; `edges`
+    (left/right half-widths per point) bound the racing line."""
     x, y = np.asarray(outline['x'], float), np.asarray(outline['y'], float)
     poly = float(np.sum(np.hypot(np.roll(x, -1) - x, np.roll(y, -1) - y)))
     length = float(outline.get('length') or 0)
     scale = length / poly if length > 1000 and poly > 0 else (0.1 if poly > 20000 else 1.0)
-    x, y = (x - x.mean()) * scale, (y - y.mean()) * scale
-    return Track(x, y, None, source=str(outline.get('source') or 'circuit outline'), pit_frac=outline.get('pit'))
+    mx, my = x.mean(), y.mean()
+    x, y = (x - mx) * scale, (y - my) * scale
+    z = np.asarray(outline['z'], float) if outline.get('z') else None
+    frame = None
+    if outline.get('frame') == 'f1' and not outline.get('rotation'):
+        frame = (mx * scale, my * scale, float(outline.get('z_offset') or 0.0))
+    edges = None
+    if outline.get('edges'):
+        edges = (x, y, outline['edges']['left'], outline['edges']['right'])
+    return Track(x, y, z, source=str(outline.get('source') or 'circuit outline'), pit_frac=outline.get('pit'), frame=frame, edges=edges)
 
 
 # ------------------------------------------------------------------ timing timeline
@@ -538,7 +559,8 @@ def load_recorded(year: int, event: str, session_name: str, start_local: str, pr
     tx, ty, tz = conv(x[m], y[m], z[m])
     keep = np.r_[True, np.hypot(np.diff(tx), np.diff(ty)) > .3]
     track = Track(tx[keep], ty[keep], tz[keep],
-                  source=f"{year} {event} {session.get('session_name', '')}, fastest lap ({lap.driver_number}), OpenF1")
+                  source=f"{year} {event} {session.get('session_name', '')}, fastest lap ({lap.driver_number}), OpenF1",
+                  frame=(cx / 10, cy / 10, z0 / 10))
     cars = {}
     for num, (ts, x, y, z) in raw.items():
         a, b, c = conv(x, y, z)

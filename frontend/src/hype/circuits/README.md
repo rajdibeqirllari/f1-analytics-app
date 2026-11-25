@@ -6,6 +6,9 @@ in racing direction, plus `rotation`, `length`, `source` and the pit lane (`pit.
 - `mexico-city-grand-prix.json`: OpenF1 fastest lap, hand-tuned.
 - `sao-paulo-grand-prix.json`: from the open GeoJSON in https://github.com/bacinger/f1-circuits (`br-1940.geojson`),
   resampled, turned to racing direction (anticlockwise) and started ~300 m before the Senna S.
+- `qatar-grand-prix.json`: OpenStreetMap centreline and asphalt edges (© OpenStreetMap contributors, ODbL), aligned to
+  OpenF1 positions; in the F1 position frame (`frame: "f1"`, unrotated) with elevation `z` (m), `z_offset` and per-point
+  `edges` (left/right half-widths). Same geometry as the 3D venue (`assets/3d/qatar/README.md`).
 
 ## bacinger/f1-circuits license (MIT)
 

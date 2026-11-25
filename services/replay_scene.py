@@ -153,7 +153,7 @@ def _scene_from(native, offset, fastest, payload, label, err) -> dict[str, Any]:
     conv = lambda a, b, c: ((a - cx) / 10, (b - cy) / 10, (c - z0) / 10)
     tx, ty, tz = conv(x[m], y[m], z[m])
     keep = np.r_[True, np.hypot(np.diff(tx), np.diff(ty)) > .3]
-    track = sc.Track(tx[keep], ty[keep], tz[keep], source=f'fastest lap ({code}), {label}')
+    track = sc.Track(tx[keep], ty[keep], tz[keep], source=f'fastest lap ({code}), {label}', frame=(cx / 10, cy / 10, z0 / 10))
     cars = {}
     for c, (tt, xx, yy, zz) in native.items():
         a, b, h = conv(xx, yy, zz)
@@ -170,7 +170,7 @@ def _scene_from(native, offset, fastest, payload, label, err) -> dict[str, Any]:
 def _scene_from_frames(payload: dict, why: str) -> dict[str, Any]:
     pts = np.array([p for p in payload['track']['centerline'] if p and p[0] is not None], float)
     cx, cy = pts[:, 0].mean(), pts[:, 1].mean()
-    track = sc.Track((pts[:, 0] - cx) / 10, (pts[:, 1] - cy) / 10, None, source='replay outline')
+    track = sc.Track((pts[:, 0] - cx) / 10, (pts[:, 1] - cy) / 10, None, source='replay outline', frame=(cx / 10, cy / 10, 0.0))
     series: dict[str, list] = {}
     for f in payload['frames']:
         for code, car in (f.get('drivers') or {}).items():

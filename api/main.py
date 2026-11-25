@@ -327,6 +327,9 @@ app.mount('/design',StaticFiles(directory=ROOT/'frontend'/'public'/'design'),nam
 dist=ROOT/'frontend'/'dist'
 if dist.is_dir():
     app.mount('/assets',StaticFiles(directory=dist/'assets'),name='frontend-assets')
+    # 3D Broadcast models (venue GLBs, car GLBs, Draco decoder), copied from frontend/public by the build.
+    for _sub in ('venues','cars','draco'):
+        if (dist/_sub).is_dir(): app.mount(f'/{_sub}',StaticFiles(directory=dist/_sub),name=f'frontend-{_sub}')
 
 @app.get('/{path:path}')
 def frontend(path:str):

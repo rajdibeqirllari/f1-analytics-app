@@ -4,7 +4,9 @@
 
 /** `exact`: the clock is the page's own playback time, sent every frame (Replay page), not a once-a-second poll. */
 export type FeedInfo={mode:'follow'|'replay';file:string;speed:number;paused:boolean;clock:number|null;start:number|null;end:number|null;ended?:boolean;growing?:boolean;exact?:boolean};
-export type SceneTrack={x:number[];y:number[];z:number[];length:number;source:string;pit:number[][]|null;pit_frac:{entry:number;exit:number}|null;speed:number[];line?:number[]};
+export type SceneTrack={x:number[];y:number[];z:number[];length:number;source:string;pit:number[][]|null;pit_frac:{entry:number;exit:number}|null;speed:number[];line?:number[];
+ /** The scene is the F1 position frame (metres) minus this offset (dx, dy, dz); venue models use it for exact placement. */
+ frame?:number[]|null};
 export type DriverMeta={code:string;name:string;team:string;color:string};
 export type SceneInfo={ok:boolean;error?:string;loading?:boolean;file:string;mode:string;source:'recorded'|'estimated';label:string;detail:string;key:string;
  session:{meeting:string;name:string;year:number|null;type:string;start:string};total_laps:number|null;track:SceneTrack;drivers:Record<string,DriverMeta>;
