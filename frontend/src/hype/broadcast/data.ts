@@ -7,12 +7,15 @@ export type FeedInfo={mode:'follow'|'replay';file:string;speed:number;paused:boo
 export type SceneTrack={x:number[];y:number[];z:number[];length:number;source:string;pit:number[][]|null;pit_frac:{entry:number;exit:number}|null;speed:number[];line?:number[];
  /** The scene is the F1 position frame (metres) minus this offset (dx, dy, dz); venue models use it for exact placement. */
  frame?:number[]|null};
-export type DriverMeta={code:string;name:string;team:string;color:string};
+export type DriverMeta={code:string;name:string;team:string;color:string;number?:string};
 export type SceneInfo={ok:boolean;error?:string;loading?:boolean;file:string;mode:string;source:'recorded'|'estimated';label:string;detail:string;key:string;
  session:{meeting:string;name:string;year:number|null;type:string;start:string};total_laps:number|null;track:SceneTrack;drivers:Record<string,DriverMeta>;
  recorded:{status:string;reason?:string;progress?:number;driver?:string;provider?:string;rate?:number}};
 type RawSamples={key:string;t0:number;t1:number;frontier:number;source:'recorded'|'estimated';step:number|null;
- cars:Record<string,{t:number[];x:number[];y:number[];z:number[]}|{s:(number|null)[];f:number[]}>;timing:Record<string,(number|string|null)[][]>};
+ cars:Record<string,{t:number[];x:number[];y:number[];z:number[]}|{s:(number|null)[];f:number[]}>;timing:Record<string,(number|string|null)[][]>;
+ /** Reconstructed racing lines (services/racing_lines.py): lateral offset o (m, left +) and flags q (1 adjusted,
+  * 2 uncertain, 4 grid) on a regular grid starting at t0 (session seconds, not relative). */
+ recon?:{t0:number;step:number;cars:Record<string,{o:number[];q:number[]}>}|null};
 
 /** In follow (live) mode the picture runs this far behind the newest data, so cars move between real crossings. */
 export const LIVE_DELAY=5;
@@ -77,7 +80,10 @@ export class TrackCurve{
   return {i:best,dist:Math.sqrt(bd),d:this.s[best]}}
 }
 
-export type Pose={num:string;x:number;y:number;z:number;h:number;d:number;lapFrac:number;offTrack:boolean;flag:'ok'|'extrapolated'|'stale';speed:number};
+export type Pose={num:string;x:number;y:number;z:number;h:number;d:number;lapFrac:number;offTrack:boolean;flag:'ok'|'extrapolated'|'stale';speed:number;
+ /** Lateral placement: 'source' as recorded/estimated, 'recon' shifted by the reconstruction (uncertain/grid flags). */
+ lateral:'source'|'recon';uncertain:boolean;grid:boolean;offset:number};
+export type LinesMode='recon'|'raw';
 export type TimingRow={pos:number|null;laps:number;interval:string|null;gap:string|null;inPit:boolean;retired:boolean;stopped:boolean;out:boolean};
 
 type RecCar={t:Float64Array;x:Float32Array;y:Float32Array;z:Float32Array};
@@ -87,15 +93,21 @@ type EstCar={s:Float64Array;f:Int8Array};
 export class Buffer{
  key:string;t0:number;t1:number;frontier:number;source:'recorded'|'estimated';step:number;
  rec=new Map<string,RecCar>();est=new Map<string,EstCar>();timing=new Map<string,{t:number;row:TimingRow}[]>();
+ recon=new Map<string,{o:Float32Array;q:Uint8Array}>();rt0=0;rstep=0.25;
  constructor(r:RawSamples){
   this.key=r.key;this.t0=r.t0;this.t1=r.t1;this.frontier=r.frontier;this.source=r.source;this.step=r.step||0.25;
   for(const [num,c] of Object.entries(r.cars)){
    if('t' in c)this.rec.set(num,{t:Float64Array.from(c.t,v=>v+r.t0),x:Float32Array.from(c.x),y:Float32Array.from(c.y),z:Float32Array.from(c.z)});
    else this.est.set(num,{s:Float64Array.from(c.s,v=>v==null?NaN:v),f:Int8Array.from(c.f)})}
+  if(r.recon){this.rt0=r.recon.t0;this.rstep=r.recon.step||0.25;for(const [num,c] of Object.entries(r.recon.cars))this.recon.set(num,{o:Float32Array.from(c.o),q:Uint8Array.from(c.q)})}
   for(const [num,rows] of Object.entries(r.timing))this.timing.set(num,rows.map(q=>({t:(q[0] as number)+r.t0,row:{pos:q[1] as number|null,laps:(q[2] as number)||0,
    interval:(q[3] as string)||null,gap:(q[4] as string)||null,inPit:!!q[5],retired:!!q[6],stopped:!!q[7],out:!!q[8]}})));
  }
  covers(D:number){return D>=this.t0&&D<=this.t1}
+ /** Reconstructed lateral offset at D (linear between grid samples), its rate (m/s) and flags; null where none. */
+ reconAt(num:string,D:number):{o:number;v:number;q:number}|null{const c=this.recon.get(num);if(!c)return null;const f=(D-this.rt0)/this.rstep;
+  const i=Math.floor(f);if(i<0||i>=c.o.length)return null;const j=Math.min(c.o.length-1,i+1),k=f-i;
+  return {o:c.o[i]+(c.o[j]-c.o[i])*k,v:(c.o[j]-c.o[i])/this.rstep,q:k<0.5?c.q[i]:c.q[j]}}
  timingAt(num:string,D:number):TimingRow|null{const rows=this.timing.get(num);if(!rows||!rows.length)return null;let lo=0,hi=rows.length-1,ans=-1;
   while(lo<=hi){const m=(lo+hi)>>1;if(rows[m].t<=D){ans=m;lo=m+1}else hi=m-1}return ans<0?rows[0].row:rows[ans].row}
  /** Cumulative distance (estimated mode) at D, linear between the server's evenly spaced samples. */
@@ -129,20 +141,26 @@ export async function fetchSamples(base:string,t0:number,t1:number,source:string
 
 /** Every car's pose at instant D. Pure: depends only on D, the buffer and the track (hints only speed up searches). */
 export function poses(buf:Buffer,track:TrackCurve,D:number,hints:Map<string,number>,lastHeading:Map<string,number>,
- correction:Map<string,{v:number;at:number}>,wallNow:number):Map<string,Pose>{
+ correction:Map<string,{v:number;at:number}>,wallNow:number,lines:LinesMode='recon'):Map<string,Pose>{
  const out=new Map<string,Pose>();
+ // Reconstructed lines: shift along the track normal at the car (never along the lap: order and gaps stay recorded).
+ const lateral=(p:Pose,nx:number,ny:number)=>{if(lines!=='recon')return p;const r=buf.reconAt(p.num,D);if(!r||(!r.q&&Math.abs(r.o)<0.01))return p;
+  p.x+=nx*r.o;p.y+=ny*r.o;p.offset=r.o;p.lateral='recon';p.uncertain=!!(r.q&2);p.grid=!!(r.q&4);
+  if(p.speed>2)p.h+=Math.atan2(r.v,Math.max(8,p.speed));return p};
  if(buf.source==='recorded'){
   for(const num of buf.rec.keys()){const r=buf.recAt(num,D);if(!r)continue;
    const near=track.nearest(r.x,r.y,hints.get(num)??-1);hints.set(num,near.i);
    const sp=Math.hypot(r.vx,r.vy);let h=lastHeading.get(num)??track.at(near.d).h;if(sp>3)h=Math.atan2(r.vy,r.vx);lastHeading.set(num,h);
    // Height from the measured circuit under the car (the per-sample z is noisier than the track's).
-   out.set(num,{num,x:r.x,y:r.y,z:near.dist<9?track.z[near.i]:r.z,h,d:near.d,lapFrac:near.d/track.length,offTrack:near.dist>9,flag:r.flag,speed:sp})}
+   const pose:Pose={num,x:r.x,y:r.y,z:near.dist<9?track.z[near.i]:r.z,h,d:near.d,lapFrac:near.d/track.length,offTrack:near.dist>9,flag:r.flag,speed:sp,lateral:'source',uncertain:false,grid:false,offset:0};
+   out.set(num,lateral(pose,-track.ty[near.i],track.tx[near.i]))}
  }else{
   for(const num of buf.est.keys()){const e=buf.estAt(num,D);if(!e)continue;
    let s=e.s;const c=correction.get(num);if(c){const k=Math.max(0,1-(wallNow-c.at)/700);if(k>0)s+=c.v*k;else correction.delete(num)}
    const frac=(((s/track.serverLength)%1)+1)%1,d=frac*track.length;const p=track.atLine(d);
    const e2=buf.estAt(num,D+0.5);const sp=e2?Math.max(0,(e2.s-e.s)/0.5):0;
-   out.set(num,{num,x:p.x,y:p.y,z:p.z,h:p.h,d,lapFrac:frac,offTrack:false,flag:e.f===0?'ok':e.f===1?'extrapolated':'stale',speed:sp})}
+   const pose:Pose={num,x:p.x,y:p.y,z:p.z,h:p.h,d,lapFrac:frac,offTrack:false,flag:e.f===0?'ok':e.f===1?'extrapolated':'stale',speed:sp,lateral:'source',uncertain:false,grid:false,offset:0};
+   out.set(num,lateral(pose,-Math.sin(p.h),Math.cos(p.h)))}
  }
  return out;
 }

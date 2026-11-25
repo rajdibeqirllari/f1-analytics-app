@@ -136,7 +136,7 @@ VOICES = {  # Kokoro English voices that suit commentary (b* = British, a* = Ame
     'am_michael': 'Michael (American)', 'am_adam': 'Adam (American)', 'am_eric': 'Eric (American)', 'am_onyx': 'Onyx (American)',
     'am_puck': 'Puck (American)', 'bf_emma': 'Emma (British)', 'af_heart': 'Heart (American)', 'af_bella': 'Bella (American)',
 }
-DEFAULT_VOICE = os.environ.get('RACEHYPE_VOICE', 'bm_george')
+DEFAULT_VOICE = os.environ.get('RACEHYPE_VOICE', 'bm_george')   # the owner's commentary voice; Emma (bf_emma) belongs to the optional OBS host
 
 class Speaker:
     """Kokoro text-to-speech (Apache 2.0, runs locally): one WAV per commentary line, faster on bigger moments."""
@@ -583,7 +583,7 @@ class Commentator:
             self.busy_until = time.time() + seconds + 0.4
             self.recent.append(text)
             self.lines.append(dict(id=line_id, time=_hms(lead['t']), text=text, kind=lead['kind'], prio=lead['prio'], source=source,
-                                   drivers=line_drivers(text, batch, rows), radio=radio, audio=audio,
+                                   drivers=line_drivers(text, batch, rows), radio=radio, audio=audio, event_clock=lead['t'],
                                    lag=round(((self.clock or 0) - (lead['t'] or self.clock or 0)) / max(1.0, self.speed), 1),
                                    facts=[e['text'] for e in batch]))
 

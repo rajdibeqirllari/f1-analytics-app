@@ -1,0 +1,210 @@
+{
+ "season": 2026,
+ "teams": [
+  {
+   "key": "mclaren",
+   "chassis": "McLaren MCL40",
+   "team": "McLaren",
+   "aliases": [
+    "^mclaren"
+   ],
+   "drivers": {
+    "NOR": 1,
+    "PIA": 81
+   },
+   "number": {
+    "font": "shoulders",
+    "fill": "#1E1F24",
+    "outline": "#FFFFFF"
+   },
+   "finish": "gloss"
+  },
+  {
+   "key": "ferrari",
+   "chassis": "Ferrari SF-26",
+   "team": "Ferrari",
+   "aliases": [
+    "^(scuderia )?ferrari"
+   ],
+   "drivers": {
+    "LEC": 16,
+    "HAM": 44
+   },
+   "number": {
+    "font": "serif",
+    "fill": "#FFFFFF",
+    "outline": null
+   },
+   "finish": "satin"
+  },
+  {
+   "key": "red_bull",
+   "chassis": "Red Bull RB22",
+   "team": "Red Bull Racing",
+   "aliases": [
+    "^(oracle )?red bull( racing)?$"
+   ],
+   "drivers": {
+    "VER": 3,
+    "HAD": 6
+   },
+   "number": {
+    "font": "shoulders",
+    "fill": "#FFFFFF",
+    "outline": "#DB0A40"
+   },
+   "finish": "gloss"
+  },
+  {
+   "key": "mercedes",
+   "chassis": "Mercedes W17",
+   "team": "Mercedes",
+   "aliases": [
+    "^mercedes"
+   ],
+   "drivers": {
+    "RUS": 63,
+    "ANT": 12
+   },
+   "number": {
+    "font": "shoulders",
+    "fill": "#00A19C",
+    "outline": "#FFFFFF"
+   },
+   "finish": "satin"
+  },
+  {
+   "key": "aston_martin",
+   "chassis": "Aston Martin AMR26",
+   "team": "Aston Martin",
+   "aliases": [
+    "^aston martin"
+   ],
+   "drivers": {
+    "ALO": 14,
+    "STR": 18
+   },
+   "number": {
+    "font": "shoulders",
+    "fill": "#CEDC00",
+    "outline": null
+   },
+   "finish": "satin"
+  },
+  {
+   "key": "alpine",
+   "chassis": "Alpine A526",
+   "team": "Alpine",
+   "aliases": [
+    "^(bwt )?alpine"
+   ],
+   "drivers": {
+    "GAS": 10,
+    "COL": 43
+   },
+   "number": {
+    "font": "shoulders",
+    "fill": "#FFFFFF",
+    "outline": "#F363B4"
+   },
+   "finish": "gloss"
+  },
+  {
+   "key": "williams",
+   "chassis": "Williams FW48",
+   "team": "Williams",
+   "aliases": [
+    "^(atlassian )?williams"
+   ],
+   "drivers": {
+    "ALB": 23,
+    "SAI": 55
+   },
+   "number": {
+    "font": "shoulders",
+    "fill": "#FFFFFF",
+    "outline": "#0B1E4A"
+   },
+   "finish": "gloss"
+  },
+  {
+   "key": "racing_bulls",
+   "chassis": "Racing Bulls VCARB 03",
+   "team": "Racing Bulls",
+   "aliases": [
+    "^(visa cash app )?(racing bulls|rb)( f1 team)?$",
+    "^rb$"
+   ],
+   "drivers": {
+    "LAW": 30,
+    "LIN": 41
+   },
+   "number": {
+    "font": "shoulders",
+    "fill": "#1634CC",
+    "outline": "#FFFFFF"
+   },
+   "finish": "gloss"
+  },
+  {
+   "key": "haas",
+   "chassis": "Haas VF-26",
+   "team": "Haas",
+   "aliases": [
+    "^(tgr |moneygram )?haas"
+   ],
+   "drivers": {
+    "BEA": 87,
+    "CAM": 51
+   },
+   "number": {
+    "font": "shoulders",
+    "fill": "#E10600",
+    "outline": "#1A1A1A"
+   },
+   "finish": "satin"
+  },
+  {
+   "key": "audi",
+   "chassis": "Audi R26",
+   "team": "Audi",
+   "aliases": [
+    "^(revolut )?audi",
+    "^(stake |kick )?sauber",
+    "^kick sauber"
+   ],
+   "drivers": {
+    "HUL": 27,
+    "BOR": 5
+   },
+   "number": {
+    "font": "shoulders",
+    "fill": "#E10619",
+    "outline": "#141414"
+   },
+   "finish": "satin"
+  },
+  {
+   "key": "cadillac",
+   "chassis": "Cadillac (2026)",
+   "team": "Cadillac",
+   "aliases": [
+    "^cadillac"
+   ],
+   "drivers": {
+    "BOT": 77,
+    "PER": 11
+   },
+   "number": {
+    "font": "shoulders",
+    "fill": "#B8975A",
+    "outline": "#0D0D0F"
+   },
+   "finish": "gloss"
+  }
+ ],
+ "preview_from_2025": {
+  "^(stake |kick )?sauber|^kick sauber": "audi",
+  "^(visa cash app )?(racing bulls|rb)": "racing_bulls"
+ }
+}

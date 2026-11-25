@@ -1,3 +1,7 @@
+# 2026 field (all eleven constructors)
+
+Built by `scripts/cars2026/build_field.py` from `scripts/cars2026/teams.py` (entry list, liveries, sponsors, number styles, dated sources and the list of official artwork NOT reproduced). One `.blend` + GLB per constructor; teammates share geometry and livery, numbers and T-cam colour are per car in the browser. The W17/RB22 notes below describe the original archetypes the field is built from.
+
 # 2026 cars: Mercedes W17 and Red Bull RB22
 
 Original parametric models built by `scripts/qatar/build_cars_blend.py` (Blender 4.5.9). Nothing is copied from a

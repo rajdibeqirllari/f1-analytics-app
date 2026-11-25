@@ -1,4 +1,5 @@
-import React,{Suspense,lazy,useState,useEffect} from 'react';
+import React,{Suspense,useState,useEffect} from 'react';
+import {recoverableLazy as lazy,ChunkBoundary} from './chunkRecovery';
 import {createRoot} from 'react-dom/client';
 import {BrowserRouter,Routes,Route,Link,useLocation} from 'react-router-dom';
 import {Flag,Timer,ChartNoAxesCombined,Clapperboard,Download,Layers,RotateCcw,Radio,FolderOpen,PanelLeftClose,PanelLeftOpen,Menu,X} from 'lucide-react';
@@ -55,9 +56,9 @@ function Shell(){
  <button className="collapse-nav" onClick={()=>{setCollapsed(!collapsed);setMobile(false)}} aria-label={collapsed?'Expand navigation':'Collapse navigation'}>{collapsed?<PanelLeftOpen/>:<PanelLeftClose/>}<span>Collapse navigation</span></button></aside>
  <div className="main-shell"><div className="topbar"><button className="mobile-menu icon-button" aria-label={mobile?'Close menu':'Open menu'} onClick={()=>setMobile(!mobile)}>{mobile?<X/>:<Menu/>}</button><div className="crumb"><span>RACE HYPE</span><i>/</i><b>{current[2]}</b></div><span className="archive-label"><i/> REAL DATA. REAL DETAIL.</span></div>
  <ContextBar/><ErrorBox message={health.error}/>
- <main id="main-content"><Suspense fallback={<div className="skeleton" aria-label="Loading workspace"/>}><Routes>
+ <main id="main-content"><ChunkBoundary><Suspense fallback={<div className="skeleton" aria-label="Loading workspace"/>}><Routes>
  <Route path="/" element={<RaceCenter/>}/><Route path="/timing" element={<Timing/>}/><Route path="/analysis" element={<Analysis/>}/><Route path="/videos" element={<Videos/>}/><Route path="/telemetry" element={<Telemetry/>}/><Route path="/overlays" element={<Overlays/>}/><Route path="/replay" element={<Replay/>}/><Route path="/radio" element={<TeamRadio/>}/><Route path="/downloads" element={<Downloads/>}/><Route path="*" element={<RaceCenter/>}/>
- </Routes></Suspense></main><footer className="site-footer"><span>RACE HYPE © {new Date().getFullYear()}</span><span>INDEPENDENT MOTORSPORT ANALYSIS · HISTORICAL DATA IS NOT A LIVE FEED</span><b>CHASE THE DETAIL ↗</b></footer></div></div>;
+ </Routes></Suspense></ChunkBoundary></main><footer className="site-footer"><span>RACE HYPE © {new Date().getFullYear()}</span><span>INDEPENDENT MOTORSPORT ANALYSIS · HISTORICAL DATA IS NOT A LIVE FEED</span><b>CHASE THE DETAIL ↗</b></footer></div></div>;
 }
 class Boundary extends React.Component<{children:React.ReactNode},{error:string}>{state={error:''};static getDerivedStateFromError(error:Error){return {error:error.message}}render(){return this.state.error?<div className="fatal"><h1>RACE HYPE</h1><ErrorBox message={this.state.error}/><button onClick={()=>window.location.reload()}>Reload the workspace</button></div>:this.props.children}}
-createRoot(document.getElementById('root')!).render(<Boundary><BrowserRouter><SessionProvider><Routes><Route path="/hype/*" element={<Suspense fallback={null}><Hype/></Suspense>}/><Route path="*" element={<Shell/>}/></Routes></SessionProvider></BrowserRouter></Boundary>);
+createRoot(document.getElementById('root')!).render(<Boundary><BrowserRouter><SessionProvider><Routes><Route path="/hype/*" element={<ChunkBoundary><Suspense fallback={null}><Hype/></Suspense></ChunkBoundary>}/><Route path="*" element={<Shell/>}/></Routes></SessionProvider></BrowserRouter></Boundary>);

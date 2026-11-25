@@ -6,6 +6,12 @@
       "runtimeExecutable": "C:\\f1hud_app\\.venv\\Scripts\\python.exe",
       "runtimeArgs": ["-m", "uvicorn", "api.main:app", "--host", "127.0.0.1", "--port", "8001"],
       "port": 8001
+    },
+    {
+      "name": "engine-isolated-8002",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "C:\\f1hud_app\\scripts\\run_isolated_engine.cmd"],
+      "port": 8002
     }
   ]
 }

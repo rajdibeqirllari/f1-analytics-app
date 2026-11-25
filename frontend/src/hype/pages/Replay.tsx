@@ -1,4 +1,5 @@
-import {lazy,Suspense,useEffect,useMemo,useRef,useState} from 'react';
+import {Suspense,useEffect,useMemo,useRef,useState} from 'react';
+import {recoverableLazy,registerResume,takeResume} from '../../chunkRecovery';
 import {request,teamColor} from '../../api';
 import {useSession,useTask,useResource} from '../../state';
 import {PageHead,Choice,Group,Action,JobBar,Blank,Note} from '../kit';
@@ -15,7 +16,7 @@ type Payload={meta:{year:number;event:string;round:number;session:string;duratio
 
 const RES=600;
 // Three.js only loads when a viewer opens the 3D view (same component as the Live page).
-const Broadcast3D=lazy(()=>import('../broadcast/Broadcast3D'));
+const Broadcast3D=recoverableLazy(()=>import('../broadcast/Broadcast3D'));
 const hasWebGL=()=>{try{const c=document.createElement('canvas');return !!(c.getContext('webgl2')||c.getContext('webgl'))}catch{return false}};
 const viewStore={get:()=>{try{return localStorage.getItem('rhx-replay-view')==='3d'?'3d':'2d'}catch{return '2d'}},set:(v:string)=>{try{localStorage.setItem('rhx-replay-view',v)}catch{}}};
 const TYRE:Record<string,string>={SOFT:'S',MEDIUM:'M',HARD:'H',INTERMEDIATE:'I',WET:'W'};
@@ -76,7 +77,7 @@ function prepare(pl:Payload){
   if(run.length<120){const at=(p:number)=>{const f=((p%1)+1)%1*RES,i=Math.floor(f)%RES,j=(i+1)%RES,k=f-Math.floor(f);return [pts[i][0]+(pts[j][0]-pts[i][0])*k,pts[i][1]+(pts[j][1]-pts[i][1])*k]};
    const line=[at((run[0]-3)/200),...run.map(b=>{const c=bins.get(b)!;return [c[0]/c[2],c[1]/c[2]]}),at((run[run.length-1]+4)/200)];
    pit='M'+line.map(q=>q[0].toFixed(0)+' '+q[1].toFixed(0)).join('L')}}
- return {lapTimes:laps,pit,pts,tf,span,codes,t,P,D,X,Y,O,out,lead,laps:pl.frames.reduce((a,f)=>Math.max(a,f.lap||0),0)};
+ return {lapTimes:laps,pit,pts,tf,span,codes,t,P,D,X,Y,O,out,lead,rot,laps:pl.frames.reduce((a,f)=>Math.max(a,f.lap||0),0)};
 }
 
 const frameAt=(t:Float64Array,T:number)=>{let lo=0,hi=t.length-1;if(T<=t[0])return [0,0];if(T>=t[hi])return [hi,0];
@@ -136,13 +137,18 @@ function Player({pl,onReload,hidden,scene}:{pl:Payload;onReload:()=>void;hidden?
  const [view,setView]=useState<'2d'|'3d'>(viewStore.get);const pickView=(v:'2d'|'3d')=>{setView(v);viewStore.set(v)};
  const webgl=useMemo(hasWebGL,[]);const api=useMemo(()=>({scene,samples:scene+'/samples'}),[scene]);
  const t0=g.t[0],t1=g.t[g.t.length-1];
- const [T,setT]=useState(t0),[playing,setPlaying]=useState(false),[speed,setSpeed]=useState(1),[focus,setFocus]=useState<string|null>(null);
+ // After a version reload, come back to the same moment and driver (saved by chunkRecovery).
+ const resume=useMemo(()=>takeResume('replay') as {t?:number;focus?:string|null;scene?:string}|null,[]);
+ const back=resume&&resume.scene===scene?resume:null;
+ const [T,setT]=useState(back&&Number.isFinite(back.t)?Math.max(t0,Math.min(t1,back.t!)):t0),[playing,setPlaying]=useState(false),[speed,setSpeed]=useState(1),[focus,setFocus]=useState<string|null>(back?.focus??null);
  const live=useRef({playing,speed});live.current={playing,speed};
  useEffect(()=>{let raf=0,last=performance.now();const frame=(now:number)=>{const dt=Math.min(.1,(now-last)/1000);last=now;
   if(live.current.playing)setT(x=>{const nx=Math.min(t1,x+dt*live.current.speed);if(nx>=t1)setPlaying(false);return nx});raf=requestAnimationFrame(frame)};
   raf=requestAnimationFrame(frame);return()=>cancelAnimationFrame(raf)},[t1]);
  // One play/pause for the button and the keyboard: at the end, Play starts again from the beginning.
  const pos=useRef(T);pos.current=T;
+ const focusRef=useRef(focus);focusRef.current=focus;
+ useEffect(()=>registerResume(()=>({replay:{t:pos.current,focus:focusRef.current,scene}})),[scene]);
  const toggle=()=>{if(!live.current.playing&&pos.current>=t1)setT(t0);setPlaying(p=>!p)};
  useEffect(()=>{if(hidden){setPlaying(false);return}
   const key=(e:KeyboardEvent)=>{if(spaceIsForPlayer(e)){e.preventDefault();toggle()}};
@@ -179,6 +185,11 @@ function Player({pl,onReload,hidden,scene}:{pl:Payload;onReload:()=>void;hidden?
  const feed={mode:'replay' as const,file:scene,speed,paused:!playing,clock:T,start:t0,end:t1,exact:true};
  const timing=Object.fromEntries(rows.map((r,i)=>{const int=intervals[i];return [r.code,{pos:r.position<99?r.position:null,laps:Math.max(0,(r.car?.lap??1)-1),
   interval:int==null?null:typeof int==='string'?int:'+'+Math.max(0,int).toFixed(1),gap:i===0&&race?null:fmtGap(r.gap),inPit:r.off,retired:r.out,stopped:false,out:false}]}));
+ // Fullscreen broadcast tower: same rows and instant as the tower below; intervals to the car ahead (estimated from positions).
+ const towerInfo={title:`${pl.meta.event.replace(/ Grand Prix$/,' GP')} · ${SESSION[pl.meta.session]||pl.meta.session}`,lap:race?(fr.lap??null):null,total:race?g.laps||null:null,estimated:true,
+  rows:rows.map((r,i)=>{const int=intervals[i];return {id:r.code,code:r.code,color:teamColor(r.info.color),pos:r.position<99?r.position:null,
+   interval:int==null?null:typeof int==='string'?null:'+'+Math.max(0,int).toFixed(3),lapped:typeof int==='string'?int.replace(/ laps?/,' L'):typeof r.gap==='string'&&i>0?String(r.gap).replace(/ laps?/,' L'):null,
+   tyre:r.car?.tyre||null,pit:!!r.off,out:!!r.out}})};
  const map=<ReplayMap g={g} cars={mapCars} flag={flag} focus={focus} onFocus={c=>setFocus(focus===c?null:c)}/>;
  return <main className="rhx-page-body rhx-live-page" hidden={hidden}>
   <section className={'rhx-livebar flag-'+flag}>
@@ -200,7 +211,7 @@ function Player({pl,onReload,hidden,scene}:{pl:Payload;onReload:()=>void;hidden?
     <button type="button" className={view==='3d'?'on':''} aria-pressed={view==='3d'} onClick={()=>pickView('3d')}>3D Broadcast</button></div>
    <small>{view==='3d'?'Click a driver in the timing tower to ride with them. Camera and driver only change your screen.':'Recorded positions on the circuit map.'}</small></div>
   {view==='3d'&&!hidden&&(webgl?<Suspense fallback={<p className="rhx-note" role="status">Loading the 3D view…</p>}>
-    <Broadcast3D feed={feed} focus={focus} onFocus={setFocus} rows={rows.map(r=>({number:r.code,code:r.code,position:r.position,color:r.info.color,knocked_out:false}))} fallback={map} api={api} timing={timing}/></Suspense>
+    <Broadcast3D feed={feed} focus={focus} onFocus={setFocus} rows={rows.map(r=>({number:r.code,code:r.code,position:r.position,color:r.info.color,knocked_out:false}))} fallback={map} api={api} timing={timing} tower={towerInfo} mapRotation={g.rot} radioUrl={scene.replace(/\/scene$/,'/radio')}/></Suspense>
    :<div className="rhx-b3d-nogl"><p className="rhx-note">This browser has no WebGL, so the 3D view can't run here. The 2D map shows the same positions.</p>{map}</div>)}
   <div className="rhx-livegrid">
    <div className="rhx-tower-wrap rhx-livetower">
@@ -237,10 +248,12 @@ function Player({pl,onReload,hidden,scene}:{pl:Payload;onReload:()=>void;hidden?
 const atPoint=(g:Geo,p:number)=>{const n=g.pts.length,f=((p%1)+1)%1*n,i=Math.floor(f)%n,j=(i+1)%n,k=f-Math.floor(f);return [g.pts[i][0]+(g.pts[j][0]-g.pts[i][0])*k,g.pts[i][1]+(g.pts[j][1]-g.pts[i][1])*k]};
 
 export default function Replay(){
- const {selection:s}=useSession(),task=useTask();const [rate,setRate]=useState(3),[refresh,setRefresh]=useState(false),[error,setError]=useState('');
+ const {selection:s}=useSession(),task=useTask('rhx-hype-replay-job');const [rate,setRate]=useState(3),[refresh,setRefresh]=useState(false),[error,setError]=useState('');
  const [data,setData]=useState<Payload|null>(null),[opening,setOpening]=useState(false),[settings,setSettings]=useState(false);
  const cache=useResource<any[]>('/api/replay-cache');
- useEffect(()=>task.reset(),[s.year,s.event,s.session]);
+ // A new weekend/session drops the loaded replay; the first run keeps a replay restored after a reload.
+ const selKey=`${s.year}|${s.event}|${s.session}`;const lastSel=useRef(selKey);
+ useEffect(()=>{if(lastSel.current!==selKey){lastSel.current=selKey;task.reset()}},[selKey]);
  const supported=['R','Q','S','SQ'].includes(s.session);
  const r=task.result;
  useEffect(()=>{setData(null);if(!r)return;const url=r.data||String(r.viewer).replace(/\/viewer$/,'/data');let alive=true;setOpening(true);setError('');setSettings(false);

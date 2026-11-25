@@ -767,4 +767,5 @@ def main():
             build_car(key)
             clay_render(key)
 
-main()
+if __name__ == "__main__":
+    main()

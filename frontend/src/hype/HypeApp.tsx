@@ -1,4 +1,5 @@
-import {Suspense,lazy,useEffect} from 'react';
+import {Suspense,useEffect} from 'react';
+import {recoverableLazy as lazy,ChunkBoundary} from '../chunkRecovery';
 import {Link,NavLink,Routes,Route,useLocation} from 'react-router-dom';
 import rhLogo from '../assets/rh-logo.png';
 import {NAV} from './nav';
@@ -31,7 +32,7 @@ export default function HypeApp(){
    <Link className="rhx-classic" to={{pathname:here[3],search}}>Classic workspace</Link>
   </header>
   {sub&&sub!=='/live'&&<div className="rhx-wbar-row"><WeekendBar/></div>}
-  <Suspense fallback={<div className="rhx-loading" aria-label="Loading page"/>}>
+  <ChunkBoundary className="rhx-chunk-error"><Suspense fallback={<div className="rhx-loading" aria-label="Loading page"/>}>
    <Routes>
     <Route index element={<Picker/>}/>
     <Route path="videos" element={<Videos/>}/>
@@ -45,7 +46,7 @@ export default function HypeApp(){
     <Route path="live" element={<Live/>}/>
     <Route path="*" element={<Picker/>}/>
    </Routes>
-  </Suspense>
+  </Suspense></ChunkBoundary>
   <footer className="rhx-foot"><span>Chase the detail.</span><span>{sub==='/live'?'@theracehype · Unofficial fan project, not affiliated with Formula 1. Public timing data; map positions are estimated; AI commentary.':'@theracehype · Historical session data, not a live feed.'}</span></footer>
  </div>;
 }

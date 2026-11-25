@@ -259,3 +259,50 @@ def scene_samples(t0: float, t1: float, source: str = 'auto', step: float = 0.25
     if not (t1 > t0) or t1 - t0 > 900:
         raise HTTPException(422, 'Ask for a window of up to 15 minutes.')
     return _scene.samples(feed, t0, t1, source, step)
+
+
+
+@router.get('/api/live/radio-events')
+def radio_events():
+    """Team radio captures in the open recording up to the feed clock, timed by when each clip aired (its own Utc).
+
+    Independent of the AI commentator: the fullscreen broadcast shows these whether commentary is on or off. A clip the
+    commentator already downloaded/transcribed is reused (transcript + local URL); otherwise the F1 static URL is given
+    (the page plays it only in "Real radio" mode; "Stream safe" shows a neutral notice or the transcript summary)."""
+    import json as _json
+    import re as _re
+    import urllib.parse as _up
+    from services.commentary import STATIC
+    if not _feed:
+        return dict(file=None, events=[])
+    with _lock:
+        snap = _feed.snapshot()          # advances the feed to its clock first (topics are applied on snapshot)
+        with _feed.lock:
+            st = _feed.state
+            caps = (st.topics.get('TeamRadio') or {}).get('Captures') or []
+            if isinstance(caps, dict):
+                caps = list(caps.values())
+            session_path = (st.topics.get('SessionInfo') or {}).get('Path') or ''
+    codes = {str(r.get('number')): (r.get('code') or str(r.get('number')), r.get('color') or '') for r in snap.get('drivers') or []}
+    folder = ROOT / 'outputs' / 'live' / 'radio' / _re.sub(r'[^\w\-]+', '_', Path(_feed.path.name).stem)
+    out = []
+    for cap in caps:
+        if not isinstance(cap, dict) or not cap.get('Path') or not cap.get('Utc'):
+            continue
+        t = lt.parse_ts(cap['Utc'])
+        if t is None:
+            continue
+        num = str(cap.get('RacingNumber') or '')
+        name = Path(str(cap['Path'])).name
+        transcript = ''
+        meta = folder / (name + '.json')
+        if meta.is_file():
+            try:
+                transcript = _json.loads(meta.read_text(encoding='utf-8')).get('text', '')
+            except (OSError, ValueError):
+                transcript = ''
+        url = f'/api/live/radio/{folder.name}/{name}' if (folder / name).is_file() else (STATIC + _up.quote(str(session_path) + str(cap['Path'])) if session_path else None)
+        code, color = codes.get(num, (num, ''))
+        out.append(dict(id=f'{num}:{cap["Utc"]}', t=round(t, 3), num=num, code=code, color=color, url=url, transcript=transcript))
+    out.sort(key=lambda e: e['t'])
+    return dict(file=_feed.path.name, events=out)

@@ -252,3 +252,8 @@ sites/taksa-ime/
 
 # Kokoro TTS model files (large)
 assets/tts/
+
+# staged / isolated frontend builds
+frontend/.build-stage/
+frontend/dist-test/
+frontend/public/design/race-host/

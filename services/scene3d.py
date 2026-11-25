@@ -82,10 +82,12 @@ class Track:
         self.pit_frac = pit_frac
         self.frame = tuple(round(float(v), 3) for v in frame) if frame is not None else None
         lo = hi = None
+        self.edges_lr = None
         if edges is not None:
             ex, ey, el, er = (np.asarray(a, float) for a in edges)
             idx = np.argmin((x[:, None] - ex[None, :]) ** 2 + (y[:, None] - ey[None, :]) ** 2, axis=1)
             hi, lo = el[idx] - 1.3, -(er[idx] - 1.3)     # car centre at least 1.3 m inside the edge
+        self.edges_lr = (el[idx], er[idx]) if edges is not None else None
         # A typical racing line (same for every car): wide on entry, clipping the apex, wide on exit.
         self.line = racing_line(x, y, LINE_HALF_WIDTH, lo=lo, hi=hi)
         tx, ty = _tangents(x, y)
@@ -361,7 +363,7 @@ class Timeline:
     def meta(self) -> dict[str, dict]:
         out = {}
         for num, d in self.drivers.items():
-            out[num] = dict(code=d.get('Tla') or num, name=d.get('FullName') or d.get('BroadcastName') or num,
+            out[num] = dict(number=str(num), code=d.get('Tla') or num, name=d.get('FullName') or d.get('BroadcastName') or num,
                             team=d.get('TeamName') or '', color='#' + str(d.get('TeamColour') or '62d7da').lstrip('#'))
         return out
 
@@ -474,6 +476,17 @@ class Recorded:
         self.session, self.cars, self.track, self.meta, self.rate = session, cars, track, meta, rate
         self.start = min(float(c['t'][0]) for c in cars.values())
         self.end = max(float(c['t'][-1]) for c in cars.values())
+        self._recon = None
+        self._recon_lock = threading.Lock()
+
+    def recon(self):
+        """Reconstructed racing lines for the whole session (computed once, a few seconds)."""
+        with self._recon_lock:
+            if self._recon is None:
+                from services import racing_lines as rl
+                span = (self.start, self.end) if self.end - self.start < 6 * 3600 else None
+                self._recon = rl.from_recorded(self.cars, self.track, edges=rl.venue_edges(str(self.session.get('event') or ''), self.track), t_range=span)
+            return self._recon
 
     def window(self, num: str, t0: float, t1: float, stride: int = 1):
         c = self.cars.get(num)
@@ -535,7 +548,7 @@ def load_recorded(year: int, event: str, session_name: str, start_local: str, pr
         order = np.argsort(ts, kind='stable')
         z = loc.z.to_numpy(float) if 'z' in loc else np.zeros(len(loc))
         raw[num] = (ts[order], loc.x.to_numpy(float)[order], loc.y.to_numpy(float)[order], z[order])
-        meta[num] = dict(code=str(d.get('name_acronym') or num), name=str(d.get('full_name') or num),
+        meta[num] = dict(number=num, code=str(d.get('name_acronym') or num), name=str(d.get('full_name') or num),
                          team=str(d.get('team_name') or ''), color='#' + str(d.get('team_colour') or '62d7da').lstrip('#'))
     if len(raw) < 2:
         raise ValueError('OpenF1 has no usable car positions for this session.')
@@ -608,6 +621,7 @@ class SceneManager:
     """Caches the timeline, tracks and recorded positions for the feed that is open on the engine."""
 
     def __init__(self, outline_fn):
+        self._recon_cache: dict = {}
         self.outline_fn = outline_fn          # (year, event) -> outline dict (engine's /api/live/track)
         self.lock = threading.RLock()
         self.path: Path | None = None
@@ -664,6 +678,11 @@ class SceneManager:
                                     info.get('Name') or '', info.get('StartDate') or '', prog)
                 if rec.end < (tl.first_ts or 0) or rec.start > (tl.last_ts or 0):
                     raise ValueError('The recorded positions do not cover this recording\'s time span.')
+                state['driver'] = 'reconstructing racing lines'
+                try:
+                    rec.recon()          # computed here, in the background, not inside the first samples request
+                except Exception:
+                    pass
                 result: Any = rec
             except Exception as exc:
                 result = dict(status='unavailable', reason=f'No recorded positions: {str(exc)[:200]}')
@@ -720,6 +739,7 @@ class SceneManager:
             frontier = max(frontier, feed.last_time() or frontier)
         cars: dict[str, Any] = {}
         est_step = None
+        recon = None
         if use_rec:
             span = t1 - t0
             stride = 1 if span <= 120 else 2 if span <= 300 else 4
@@ -729,6 +749,10 @@ class SceneManager:
                     continue
                 ts, x, y, z = w
                 cars[num] = dict(t=np.round(ts - t0, 3).tolist(), x=x.tolist(), y=y.tolist(), z=z.tolist())
+            try:
+                recon = rec.recon().window(t0, t1)
+            except Exception:
+                recon = None
         else:
             track = self._estimated_track(tl)
             est = self.estimators.get(str(tl.session.get('Path')))
@@ -741,6 +765,7 @@ class SceneManager:
                 if np.isnan(s).all():
                     continue
                 cars[num] = dict(s=[None if np.isnan(v) else round(float(v), 1) for v in s], f=f.tolist())
+            recon = self._estimated_recon(tl, track, est, feed, t0, t1, step, frontier)
         # Classification at the window start plus every change inside it: the HUD shows what the feed said at the
         # displayed instant (position, laps, official interval), never a position-derived order.
         timing = {}
@@ -751,4 +776,25 @@ class SceneManager:
                 timing[num] = [[round(r[0] - t0, 3), r[1], r[2], r[3], r[4], int(r[5]), int(r[6]), int(r[7]), int(r[8])] for r in rows]
         return dict(key=f"{feed.path.name}|{feed.mode}|{'recorded' if use_rec else 'estimated'}", t0=t0, t1=t1,
                     frontier=frontier, source='recorded' if use_rec else 'estimated',
-                    cars=cars, step=est_step, timing=timing)
+                    cars=cars, step=est_step, timing=timing, recon=recon)
+
+    def _estimated_recon(self, tl, track, est, feed, t0, t1, step, frontier):
+        """Reconstructed lines for timing-only cars. A finished recording is reconstructed over its whole timeline
+        once (so seeking reproduces the same manoeuvre); a growing one over the window plus 20 s of lead-in."""
+        from services import racing_lines as rl
+        try:
+            names = [n for n in tl.crossings]
+            if feed.mode == 'replay' and not feed.growing() and tl.first_ts and frontier:
+                key = (str(tl.session.get('Path')), id(est), round(frontier, 1))
+                res = self._recon_cache.get(key)
+                if res is None:
+                    times = np.arange(float(tl.first_ts) - 5, float(frontier) + 0.25, 0.25)
+                    samples = {n: est.sample(n, times, frontier)[0] for n in names}
+                    res = rl.from_estimated(samples, track, times, edges=getattr(track, 'edges_lr', None))
+                    self._recon_cache = {key: res}
+                return res.window(t0, t1)
+            times = np.arange(t0 - 20, t1 + 0.25, 0.25)
+            samples = {n: est.sample(n, times, frontier)[0] for n in names}
+            return rl.from_estimated(samples, track, times, edges=getattr(track, 'edges_lr', None)).window(t0, t1)
+        except Exception:
+            return None

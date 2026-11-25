@@ -30,12 +30,16 @@ export function useTask(storageKey?:string){
  const [job,setJob]=useState<Job|null>(null),[error,setError]=useState(''),[submitting,setSubmitting]=useState(false),[retrying,setRetrying]=useState(false);
  const [id,setId]=useState<string|null>(()=>storageKey?sessionStorage.getItem(storageKey):null);
  const version=useRef(0);
+ // A job id restored from this tab's session (e.g. after a version reload) may be gone if the engine restarted:
+ // that is not an error worth showing, the page just starts fresh.
+ const restored=useRef(!!id);
  useEffect(()=>{if(storageKey){if(id)sessionStorage.setItem(storageKey,id);else sessionStorage.removeItem(storageKey)}},[id,storageKey]);
  useEffect(()=>{
   if(!id)return;let active=true;let timer:ReturnType<typeof setTimeout>;let failures=0;
-  const poll=async()=>{try{const data=await request<Job>('/api/jobs/'+id);if(!active)return;failures=0;setRetrying(false);setJob(data);
+  const poll=async()=>{try{const data=await request<Job>('/api/jobs/'+id);if(!active)return;restored.current=false;failures=0;setRetrying(false);setJob(data);
     if(ACTIVE.includes(data.status))timer=setTimeout(poll,1000);
    }catch(e){if(!active)return;
+    if(restored.current&&/not found/i.test((e as Error).message)){restored.current=false;setId(null);setJob(null);return}
     if(isNetworkError(e)&&failures<6){failures++;setRetrying(true);timer=setTimeout(poll,Math.min(15000,1000*2**failures));return}
     // A real failure: end in a consistent state so every button works again (no "running" job without an id).
     const message=isNetworkError(e)?'Lost contact with the data engine. Check that it is running, then start again.':(e as Error).message;

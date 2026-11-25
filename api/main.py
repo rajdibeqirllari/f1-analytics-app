@@ -1,6 +1,7 @@
 from datetime import datetime
 from pathlib import Path
 import json
+import os
 import re
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -10,6 +11,7 @@ import pandas as pd
 from fastapi import FastAPI,HTTPException,Request,UploadFile,File
 from fastapi.responses import FileResponse,HTMLResponse,JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel,Field,model_validator
 
 from api import engines
@@ -277,6 +279,17 @@ def replay_scene(key:str):
     return _replay_scenes.describe(key,payload)
 
 
+@app.get('/api/replays/{key}/radio')
+def replay_radio(key:str):
+    """Team radio events on the replay clock (OpenF1-built replays), for the 3D Broadcast's radio card."""
+    payload=replays.get(key)
+    if payload is None: raise HTTPException(404,'Replay not found. Load it again.')
+    from services.replay_scene import radio_events
+    item=_replay_scenes.get(key,payload)
+    if item.get('status')!='ready': return {'events':[],'reason':'The 3D scene is still loading.','loading':True}
+    return radio_events(item,payload)
+
+
 @app.get('/api/replays/{key}/scene/samples')
 def replay_scene_samples(key:str,t0:float,t1:float,source:str='auto',step:float=0.25):
     payload=replays.get(key)
@@ -324,16 +337,47 @@ for name in ('flags','f1_2026','logo'):
     folder=ROOT/'assets'/name
     if folder.is_dir(): app.mount(f'/art/{name}',StaticFiles(directory=folder),name=name)
 app.mount('/design',StaticFiles(directory=ROOT/'frontend'/'public'/'design'),name='design')
-dist=ROOT/'frontend'/'dist'
+dist=Path(os.environ.get('RACEHYPE_DIST') or ROOT/'frontend'/'dist')   # RACEHYPE_DIST: serve another build (isolated test instances)
+
+
+class CachedStatic(StaticFiles):
+    """Static files with explicit caching. Fingerprinted build chunks (/assets) never change, so browsers may keep
+    them for a year; models/decoders revalidate. A missing file is a plain 404 that is never cached, so a tab from an
+    older build sees the real failure (and recovers) instead of a cached error or an HTML page posing as a script."""
+    def __init__(self,*a,immutable=False,**k):
+        super().__init__(*a,**k);self.immutable=immutable
+    async def get_response(self,path,scope):
+        try:
+            r=await super().get_response(path,scope)
+        except StarletteHTTPException as exc:          # StaticFiles raises Starlette's class (FastAPI's subclasses it)
+            if exc.status_code!=404: raise
+            return JSONResponse({'detail':'Not found.'},status_code=404,headers={'Cache-Control':'no-store'})
+        if r.status_code==404:
+            r.headers['Cache-Control']='no-store'
+        elif r.status_code in (200,304):
+            r.headers['Cache-Control']='public, max-age=31536000, immutable' if self.immutable else 'no-cache'
+        return r
+
+
 if dist.is_dir():
-    app.mount('/assets',StaticFiles(directory=dist/'assets'),name='frontend-assets')
+    app.mount('/assets',CachedStatic(directory=dist/'assets',immutable=True),name='frontend-assets')
     # 3D Broadcast models (venue GLBs, car GLBs, Draco decoder), copied from frontend/public by the build.
     for _sub in ('venues','cars','draco'):
-        if (dist/_sub).is_dir(): app.mount(f'/{_sub}',StaticFiles(directory=dist/_sub),name=f'frontend-{_sub}')
+        if (dist/_sub).is_dir(): app.mount(f'/{_sub}',CachedStatic(directory=dist/_sub),name=f'frontend-{_sub}')
+
+_ASSET_EXT=re.compile(r'\.(js|mjs|css|map|json|wasm|glb|png|jpe?g|webp|svg|ico|woff2?|ttf|txt)$',re.I)
+
 
 @app.get('/{path:path}')
 def frontend(path:str):
     if path.startswith(('api/','art/')): raise HTTPException(404,'Not found.')
-    index=ROOT/'frontend'/'dist'/'index.html'
+    # A request for a file (script, style, image…) is never answered with the app's HTML: either the file from the
+    # build's root (e.g. favicon) or a real, uncached 404.
+    if _ASSET_EXT.search(path):
+        f=(dist/path).resolve()
+        if dist.resolve() in f.parents and f.is_file(): return FileResponse(f,headers={'Cache-Control':'no-cache'})
+        return JSONResponse({'detail':'Not found.'},status_code=404,headers={'Cache-Control':'no-store'})
+    index=dist/'index.html'
     if not index.exists(): return JSONResponse({'message':'Build the frontend with npm run build in frontend/, or use Vite on port 5173.'},status_code=503)
-    return FileResponse(index)
+    # The HTML names the current entry chunk: always revalidate it so a new build is picked up on the next load.
+    return FileResponse(index,headers={'Cache-Control':'no-cache'})

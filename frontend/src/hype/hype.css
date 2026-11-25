@@ -232,3 +232,7 @@ html.rhx-page,html.rhx-page body{background:#0c1117}
 @media (prefers-reduced-motion:reduce){
  .rhx *{animation:none!important;transition:none!important}
 }
+
+/* Page chunk could not be loaded (offline / engine down): local retry, the rest of the app keeps working */
+.rhx .rhx-chunk-error{margin:48px auto;max-width:640px;padding:18px 20px;border-left:3px solid #e8484f;background:rgba(232,72,79,.08);color:inherit}
+.rhx .rhx-chunk-error button{margin-top:10px;padding:6px 14px;border:1px solid rgba(255,255,255,.25);background:transparent;color:inherit;cursor:pointer}

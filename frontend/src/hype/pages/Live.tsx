@@ -1,4 +1,6 @@
-import {lazy,Suspense,useEffect,useMemo,useRef,useState} from 'react';
+import {Suspense,useEffect,useMemo,useRef,useState} from 'react';
+import {recoverableLazy} from '../../chunkRecovery';
+import {claimRadio,stopRadio} from '../broadcast/audioBus';
 import {request,post,teamColor} from '../../api';
 import {useSession} from '../../state';
 import {Action,Blank,Note} from '../kit';
@@ -21,7 +23,7 @@ type Track={x:number[];y:number[];rotation:number;source:string;pit?:{entry:numb
 type File={folder:string;name:string;size:number;modified:number;growing:boolean;meeting:string;session:string;start:string;title:string;hidden:boolean};
 
 // Three.js only loads when a viewer opens the 3D view.
-const Broadcast3D=lazy(()=>import('../broadcast/Broadcast3D'));
+const Broadcast3D=recoverableLazy(()=>import('../broadcast/Broadcast3D'));
 const hasWebGL=()=>{try{const c=document.createElement('canvas');return !!(c.getContext('webgl2')||c.getContext('webgl'))}catch{return false}};
 const viewStore={get:()=>{try{return localStorage.getItem('rhx-live-view')==='3d'?'3d':'2d'}catch{return '2d'}},set:(v:string)=>{try{localStorage.setItem('rhx-live-view',v)}catch{}}};
 
@@ -203,7 +205,11 @@ function useAudioChannel(){
  const el=useRef<HTMLAudioElement|null>(null),kind=useRef<'voice'|'radio'|null>(null);
  const stop=()=>{const a=el.current;if(a){a.onended=null;a.onerror=null;a.pause();a.removeAttribute('src');a.load()}el.current=null;kind.current=null;
   if(typeof speechSynthesis!=='undefined')speechSynthesis.cancel()};
- const play=(url:string,k:'voice'|'radio',onEnd:()=>void,onFail:()=>void)=>{stop();const a=new Audio(url);el.current=a;kind.current=k;
+ const play=(url:string,k:'voice'|'radio',onEnd:()=>void,onFail:()=>void,manual=false)=>{
+  // Team radio has one owner on the page (audioBus): a clip the 3D broadcast card already played is not played again
+  // automatically (the ▶ Radio button still replays it on request).
+  if(k==='radio'){if(!manual&&!claimRadio(url)){onEnd();return}stopRadio()}
+  stop();const a=new Audio(url);el.current=a;kind.current=k;
   a.onended=()=>{if(el.current===a){el.current=null;kind.current=null;onEnd()}};a.onerror=()=>{if(el.current===a){el.current=null;kind.current=null;onFail()}};
   a.play().catch(()=>{if(el.current===a){el.current=null;kind.current=null;onFail()}})};
  useEffect(()=>()=>stop(),[]);
@@ -267,12 +273,13 @@ function Commentator({c,rows}:{c:Commentary;rows:Row[]}){
  const pickRadio=(real:boolean)=>{setRealRadio(real);store.set('radio-mode',real?'real':'safe')};
  const ch=useAudioChannel();
  useVoice(c.lines,voiceOn&&c.enabled,voice,realRadio,textOnly,c.run,ch);
- const play=(url:string)=>ch.play(url,'radio',()=>{},()=>setErr('That radio clip could not be played.'));
+ const play=(url:string)=>ch.play(url,'radio',()=>{},()=>setErr('That radio clip could not be played.'),true);
  const color=(code:string)=>teamColor(rows.find(r=>r.code===code)?.color);
  const [pending,setPending]=useState(''),[err,setErr]=useState('');
  const set=async(body:any,what:string)=>{setPending(what);setErr('');try{await post('/api/live/commentary',body)}catch(e){setErr(`Couldn't change that: ${(e as Error).message}`)}finally{setPending('')}};
  return <div className="rhx-comm">
   <div className="rhx-comm-head"><h3>AI Commentator</h3>
+   <a href="/design/race-host/index.html" target="_blank" rel="noreferrer" title="Optional experiment: start the platform with -WithRaceHost first">OBS avatar (optional)</a>
    <span className={'rhx-comm-dot'+(c.enabled?' on':'')}/>
    <div className="rhx-seg is-inline" role="group" aria-label="Commentator (applies to the stream)">
     <button type="button" className={c.enabled?'on':''} disabled={!!pending} aria-pressed={c.enabled} onClick={()=>set({enabled:!c.enabled},'enabled')}>{c.enabled?'On':'Off'}</button>
@@ -414,7 +421,10 @@ export default function Live(){
     <button type="button" className={view==='3d'?'on':''} aria-pressed={view==='3d'} onClick={()=>pickView('3d')}>3D Broadcast</button></div>
    <small>{view==='3d'?'Click a driver in the timing tower to ride with them. Camera and driver only change your screen.':'Positions on the map are estimated from mini-sectors.'}</small></div>
   {view==='3d'&&(webgl?<Suspense fallback={<p className="rhx-note" role="status">Loading the 3D view…</p>}>
-    <Broadcast3D feed={feed} focus={focus} onFocus={setFocus} rows={rows} fallback={mapEl}/></Suspense>
+    <Broadcast3D feed={feed} focus={focus} onFocus={setFocus} rows={rows} fallback={mapEl} mapRotation={track?.rotation||0} radioUrl="/api/live/radio-events"
+     tower={{title:`${(s?.meeting||'Session').replace(/ Grand Prix$/,' GP')} · ${s?.name||''}`,lap:s?.lap??null,total:s?.laps??null,
+      rows:rows.filter(r=>!r.knocked_out).map(r=>({id:r.number,code:r.code,color:teamColor(r.color),pos:r.position<99?r.position:null,interval:r.position===1?null:r.interval,
+       lapped:/L/i.test(r.interval||'')?r.interval:null,tyre:r.tyre?.compound||null,pit:!!(r.in_pit||r.pit_out),out:!!(r.retired||r.stopped)}))}}/></Suspense>
    :<div className="rhx-b3d-nogl"><p className="rhx-note">This browser has no WebGL, so the 3D view can't run here. The 2D map shows the same positions.</p>{mapEl}</div>)}
   <div className="rhx-livegrid">
    <div className="rhx-tower-wrap rhx-livetower">

@@ -2,16 +2,18 @@
  * render loop (independent of React). React only passes the feed, the selected driver and the camera mode in,
  * and receives a small HUD object a few times a second. */
 import * as THREE from 'three';
-import {Buffer,Clock,TrackCurve,fetchSamples,neighbours,poses,type FeedInfo,type Pose,type SceneInfo,type TimingRow} from './data';
+import {Buffer,Clock,TrackCurve,fetchSamples,neighbours,poses,type FeedInfo,type LinesMode,type Pose,type SceneInfo,type TimingRow} from './data';
 import {labelTexture,makeCar,type CarObject} from './car';
 import {loadVenue,nightEnvironment,venueKey,type Venue,type Alignment} from './venue';
-import {isDetailed,makeDetailedCar,previewAvailable,resolveModel,type DetailedCar} from './models';
+import {MiniMap} from './minimap';
+import {isDetailed,loadRegistry,makeDetailedCar,previewAvailable,resolveModel,type DetailedCar} from './models';
 
 export type CameraMode='pod'|'broadcast'|'cockpit';
 export type Hud={elapsed:number|null;utc:number|null;num:string|null;auto:boolean;code:string;name:string;team:string;color:string;timing:TimingRow|null;totalLaps:number|null;
  ahead:{code:string;color:string;m:number}|null;behind:{code:string;color:string;m:number}|null;flag:'ok'|'extrapolated'|'stale'|'none';
  cam:string;battle:string|null;buffering:boolean;error:string;onTrack:number;ghosted:boolean;
- venue:{name:string;status:'loading'|'ready'|'off'|'error';align:Alignment|null;why:string}|null;models:{count:number;preview:boolean;previewAvailable:boolean;labels:string[]}};
+ venue:{name:string;status:'loading'|'ready'|'off'|'error';align:Alignment|null;why:string}|null;
+ lines:{mode:LinesMode;available:boolean;selected:'source'|'recon';uncertain:boolean;grid:boolean;adjustedNow:number;uncertainNow:number};models:{count:number;preview:boolean;previewAvailable:boolean;labels:string[];constructors:number;mapped:string[];generic:string[];season:number|null;previewUsed:number}};
 
 const W=(x:number,y:number,z:number)=>new THREE.Vector3(x,z,-y);   // track plane (x east, y north, z up) → three.js
 const HALF=7;   // half the asphalt width (m)
@@ -61,7 +63,8 @@ export class BroadcastEngine{
  disposed=false;
  /** Procedural circuit (replaced by a venue model when one matches and lines up) and the far skyline. */
  proc=new THREE.Group();far=new THREE.Group();venue:Venue|null=null;venueGen=0;venueState:Hud['venue']=null;
- occluders:THREE.Object3D[]=[];occCheck=0;ray=new THREE.Raycaster();
+ occluders:THREE.Object3D[]=[];occCheck=0;ray=new THREE.Raycaster();regs:any[]=[];map:MiniMap|null=null;mapRot=0;lastD=NaN;lastBuf:Buffer|null=null;selNum:string|null=null;
+ modelSummary:{constructors:number;mapped:string[];generic:string[];season:number|null;previewUsed:number}={constructors:0,mapped:[],generic:[],season:null,previewUsed:0};lines:LinesMode='recon';lastAll:Map<string,Pose>=new Map();
  key:THREE.DirectionalLight;envTex:THREE.Texture|null=null;preview=false;carGen=0;frameTimes:number[]=[];lastFrame=0;
 
  constructor(el:HTMLElement,onHud:(h:Hud)=>void){
@@ -126,6 +129,16 @@ export class BroadcastEngine{
   this.renderer.toneMappingExposure=night?1.15:1.05}
 
  setFeed(f:FeedInfo){this.feed=f;const r=this.clock.update(f,performance.now());if(r!=='ok')this.resetMotion();this.pump()}
+ /** Season of the session: the scene's year, else the session start date or the recording's file name. */
+ sessionYear(info:SceneInfo):number|null{const y=info.session?.year;if(y)return y;
+  const m=String(info.session?.start||'').match(/(20\d\d)-/)||String(info.file||'').match(/(20\d\d)-\d\d-\d\d/);return m?Number(m[1]):null}
+ /** The fullscreen map canvas (null to stop drawing) and the page map's orientation in degrees. */
+ setMap(c:HTMLCanvasElement|null,rotDeg:number){this.mapRot=rotDeg;this.map=c?new MiniMap(c):null;if(this.map)this.map.setTrack(this.track,rotDeg)}
+ /** Every driver's timing row at the displayed instant (same picture as the cars). */
+ fieldTiming():Record<string,TimingRow>{const out:Record<string,TimingRow>={};const D=this.lastD;if(!this.info||!Number.isFinite(D))return out;
+  for(const num of Object.keys(this.info.drivers)){const t=this.timingOf(num,D,this.lastBuf);if(t)out[num]=t}return out}
+ /** Reconstructed racing lines (default) or the raw source positions, for comparison. Display only. */
+ setLines(m:LinesMode){this.lines=m;for(const c of this.cars.values())if(c.ghost){c.ghost=false;for(const x of c.mats){x.transparent=false;x.opacity=1;x.depthWrite=true;x.needsUpdate=true}}}
  /** Labelled preview of a constructor's latest modelled chassis on a session from another season. */
  setPreview(on:boolean){if(on===this.preview)return;this.preview=on;if(this.info?.ok)this.buildCars(this.info)}
  setFocus(n:string|null){if(n!==this.focus){this.focus=n;this.site=-1;this.lookReady=false;this.camReady=false;this.battle=null}}
@@ -137,6 +150,7 @@ export class BroadcastEngine{
   this.applyEnv(info.session?.meeting||'');
   const tr=this.track=new TrackCurve(info.track);
   this.sites=this.buildSites(tr);
+  this.map?.setTrack(tr,this.mapRot);
   this.world.add(this.proc,this.far);
   this.buildWorld(tr,info);
   this.buildCars(info);
@@ -156,12 +170,29 @@ export class BroadcastEngine{
  buildCars(info:SceneInfo){
   const gen=++this.carGen;
   for(const [num,c] of this.cars){c.group.removeFromParent();if(isDetailed(c))for(const m of c.mats)m.dispose();this.cars.delete(num);this.labels.delete(num)}
-  for(const [num,m] of Object.entries(info.drivers)){const car=makeCar(m.color,m.code);car.group.visible=false;this.world.add(car.group);this.cars.set(num,car);
-   const r=resolveModel(m.team,info.session?.year,this.preview);if(!r)continue;
-   makeDetailedCar(r.entry,m.code,m.color).then(d=>{if(gen!==this.carGen||this.disposed||this.info!==info){for(const x of d.mats)x.dispose();return}
-    const old=this.cars.get(num);if(!old)return;
-    d.group.visible=old.group.visible;d.group.position.copy(old.group.position);d.group.rotation.copy(old.group.rotation);old.group.removeFromParent();
-    this.world.add(d.group);this.cars.set(num,d);this.labels.delete(num)}).catch(e=>console.warn('car model',e))}}
+  for(const [num,m] of Object.entries(info.drivers)){const car=makeCar(m.color,m.code);car.group.visible=false;car.group.traverse(o=>{o.castShadow=true});this.world.add(car.group);this.cars.set(num,car)}
+  this.modelSummary={constructors:0,mapped:[],generic:[],season:null,previewUsed:0};
+  const year=this.sessionYear(info);
+  loadRegistry().then(regs=>{if(gen!==this.carGen||this.disposed||this.info!==info)return;
+   this.regs=regs;const used=new Set<string>(),mapped=new Set<string>(),generic=new Set<string>();
+   // teammate order per constructor: the registry's entry order, else by car number
+   const byTeam=new Map<string,{num:string;code:string;n:number}[]>();
+   const res=new Map<string,ReturnType<typeof resolveModel>>();
+   for(const [num,m] of Object.entries(info.drivers)){const r=resolveModel(regs,m.team,year,this.preview);res.set(num,r);
+    if(!r){if(m.team)generic.add(m.team);continue}
+    used.add(r.entry.key);if(r.mappedFrom)mapped.add(`${r.mappedFrom} → ${r.entry.team}`);
+    const list=byTeam.get(r.entry.key)||[];list.push({num,code:m.code,n:Number(m.number||num)||99});byTeam.set(r.entry.key,list)}
+   const mateIndex=new Map<string,number>();
+   for(const [key,list] of byTeam){const e=[...res.values()].find(r=>r?.entry.key===key)!.entry;const order=Object.keys(e.drivers);
+    list.sort((a,b)=>{const ia=order.indexOf(a.code),ib=order.indexOf(b.code);return (ia<0?99:ia)-(ib<0?99:ib)||a.n-b.n}).forEach((d,i)=>mateIndex.set(d.num,i))}
+   this.modelSummary={constructors:used.size,mapped:[...mapped],generic:[...generic],season:Math.max(...regs.map(r=>r.season)),previewUsed:[...res.values()].filter(r=>r?.preview).length};
+   for(const [num,m] of Object.entries(info.drivers)){const r=res.get(num);if(!r)continue;
+    const number=String(m.number||(/^\d+$/.test(num)?num:'')||'');
+    makeDetailedCar(r.entry,m.code,m.color,number,mateIndex.get(num)||0).then(d=>{if(gen!==this.carGen||this.disposed||this.info!==info){for(const x of d.mats)x.dispose();return}
+     const old=this.cars.get(num);if(!old)return;
+     d.group.visible=old.group.visible;d.group.position.copy(old.group.position);d.group.rotation.copy(old.group.rotation);old.group.removeFromParent();
+     this.world.add(d.group);this.cars.set(num,d);this.labels.delete(num)}).catch(e=>console.warn('car model',e))}
+  }).catch(e=>console.warn('car registry',e))}
 
  /** Floodlit night for venue scenes: image-based light with lamp rows, a key light for shadows, low fill. */
  lightVenue(){
@@ -361,7 +392,7 @@ export class BroadcastEngine{
   if(!tr||!info){this.renderer.render(this.scene,this.camera);return}
   const D=this.display();
   const buf=this.buf&&Number.isFinite(D)&&this.buf.covers(D)?this.buf:this.prev&&this.prev.covers(D)?this.prev:null;
-  const all=buf?poses(buf,tr,D,this.hints,this.headings,this.correction,now):new Map<string,Pose>();
+  const all=buf?poses(buf,tr,D,this.hints,this.headings,this.correction,now,this.lines):new Map<string,Pose>();this.lastAll=all;
   // Selected driver: the viewer's pick, else the leader at this instant.
   let sel=this.focus,auto=false;
   if(!sel||!info.drivers[sel]){auto=true;let best=99;if(buf||this.external)for(const num of Object.keys(info.drivers)){const t=this.timingOf(num,D,buf);if(t?.pos&&t.pos<best&&!t.out){best=t.pos;sel=num}}}
@@ -389,7 +420,8 @@ export class BroadcastEngine{
   // Estimated positions have no lateral information: cars closer than a car length along the lap can't be
   // separated honestly, so they are drawn see-through instead of being given an invented side-by-side line.
   const ghosts=new Set<string>();
-  if(info.source==='estimated'){const list=[...all.values()].sort((a,b)=>a.d-b.d);
+  // Raw view only: reconstructed lines separate the cars instead (no see-through workaround there).
+  if(info.source==='estimated'&&this.lines==='raw'){const list=[...all.values()].sort((a,b)=>a.d-b.d);
    for(let i=0;i<list.length;i++){const a=list[i],b=list[(i+1)%list.length];if(a===b)continue;const gap=((b.d-a.d)%tr.length+tr.length)%tr.length;if(gap<6.5){ghosts.add(a.num);ghosts.add(b.num)}}}
   for(const [num,car] of this.cars){const g=ghosts.has(num)&&!(num===sel&&this.mode!=='broadcast');if(g!==car.ghost){car.ghost=g;
    for(const m of car.mats){m.transparent=g;m.opacity=g?0.32:1;m.depthWrite=!g;m.needsUpdate=true}}}
@@ -406,6 +438,8 @@ export class BroadcastEngine{
    const s=THREE.MathUtils.clamp(dist*Math.tan(THREE.MathUtils.degToRad(this.camera.fov/2))/(this.mode==='broadcast'?14:16),0.2,8);car.label.scale.set(2.6*s,0.98*s,1);
    car.label.position.y=1.3+1.0*s}
   this.renderer.render(this.scene,this.camera);
+  this.lastD=D;this.lastBuf=buf;this.selNum=sel;
+  if(this.map)this.map.draw(all,info.drivers,sel);
   if(now-this.lastHud>200){this.lastHud=now;this.emitHud(D,buf,all,sel,auto,tr)}
  }
 
@@ -469,7 +503,9 @@ export class BroadcastEngine{
    timing:sel?this.timingOf(sel,D,buf):null,totalLaps:info.total_laps,ahead:nm(nb.ahead),behind:nm(nb.behind),flag:p?p.flag:'none',
    cam:this.mode==='broadcast'&&this.site>=0?this.sites[this.site]?.name||'':'',battle:this.mode==='broadcast'&&this.battle?info.drivers[this.battle]?.code||null:null,
    buffering:!buf,error:this.fetchErr,onTrack,ghosted:this.ghosted,venue:this.venueState,
-   models:{count:[...this.cars.values()].filter(isDetailed).length,preview:this.preview,previewAvailable:previewAvailable(Object.values(info.drivers).map(d=>d.team),info.session?.year),
-    labels:[...new Set([...this.cars.values()].filter(isDetailed).map(c=>(c as DetailedCar).model))]}});
+   lines:{mode:this.lines,available:!!buf&&buf.recon.size>0,selected:p?.lateral||'source',uncertain:!!p?.uncertain,grid:!!p?.grid,
+    adjustedNow:[...all.values()].filter(q=>q.lateral==='recon').length,uncertainNow:[...all.values()].filter(q=>q.uncertain).length},
+   models:{count:[...this.cars.values()].filter(isDetailed).length,preview:this.preview,previewAvailable:previewAvailable(this.regs,this.sessionYear(info)),
+    labels:[...new Set([...this.cars.values()].filter(isDetailed).map(c=>(c as DetailedCar).chassis))],...this.modelSummary}});
  }
 }

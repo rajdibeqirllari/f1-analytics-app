@@ -86,6 +86,7 @@ def _openf1_native(payload: dict):
     if not timed.empty:
         lap = timed.sort_values('lap_duration').iloc[0]
         fastest = (by_number[str(int(lap.driver_number))], lap.start.value / 1e9, float(lap.lap_duration))
+    _openf1_native.last = dict(offset=offset, session_key=key, numbers=by_number)
     return native, offset, fastest, f"OpenF1 location, session {key}"
 
 
@@ -189,7 +190,8 @@ def _scene_from_frames(payload: dict, why: str) -> dict[str, Any]:
 
 
 def _meta(payload: dict) -> dict[str, dict]:
-    return {code: dict(code=code, name=d.get('name') or code, team=d.get('team') or '', color=d.get('color') or '#62d7da')
+    return {code: dict(code=code, name=d.get('name') or code, team=d.get('team') or '', color=d.get('color') or '#62d7da',
+                       number=str(d.get('number') or ''))
             for code, d in payload['drivers'].items()}
 
 
@@ -213,6 +215,17 @@ class ReplayScenes:
     def _work(self, key: str, payload: dict) -> None:
         try:
             result = build(payload)
+            result['radio_clock'] = getattr(_openf1_native, 'last', None) if payload['meta'].get('source') == 'OpenF1' else None
+            # Reconstructed racing lines (lateral placement only) for the whole session, once.
+            try:
+                from services import racing_lines as rl
+                rec = result['rec']
+                fr = payload.get('frames') or []
+                span = (float(fr[0]['t']) - 60, float(fr[-1]['t'])) if fr else None   # the replay's own range (grid included)
+                result['recon'] = rl.from_recorded(rec.cars, rec.track, edges=rl.venue_edges(str(payload['meta'].get('event') or ''), rec.track), t_range=span)
+            except Exception as exc:   # the view still works with raw positions
+                result['recon'] = None
+                result['recon_error'] = str(exc)[:200]
             result['status'] = 'ready'
         except Exception as exc:
             result = dict(status='error', reason=str(exc)[:240])
@@ -247,5 +260,38 @@ class ReplayScenes:
                 continue
             ts, x, y, z = w
             cars[code] = dict(t=np.round(ts - t0, 3).tolist(), x=x.tolist(), y=y.tolist(), z=z.tolist())
+        recon = item.get('recon')
         return dict(key=f'{token}|recorded', t0=t0, t1=t1, frontier=float(payload['frames'][-1]['t']) if payload['frames'] else t1,
-                    source='recorded', step=None, cars=cars, timing={})
+                    source='recorded', step=None, cars=cars, timing={}, recon=recon.window(t0, t1) if recon is not None else None)
+
+
+def radio_events(item: dict, payload: dict) -> dict:
+    """OpenF1 team radio for the replay's session, in payload seconds (the Replay page's clock).
+
+    Uses the same time zero the 3D scene was aligned with (checked against the payload frames). Sessions replayed from
+    the FastF1 cache have no epoch reference here, so they report no radio rather than guessing a time."""
+    rc = item.get('radio_clock')
+    if not rc:
+        return dict(events=[], reason='Team radio timing is only available for replays built from OpenF1.')
+    import pandas as pd
+    from services.openf1_comparison import historical
+    try:
+        rows = historical('team_radio', {'session_key': int(rc['session_key'])})
+    except Exception as exc:
+        return dict(events=[], reason=f'OpenF1 team radio unavailable: {str(exc)[:120]}')
+    out = []
+    end = float(payload['frames'][-1]['t']) if payload.get('frames') else None
+    for r in rows or []:
+        when = pd.to_datetime(r.get('date'), utc=True, errors='coerce')
+        if when is pd.NaT or when is None:
+            continue
+        t = when.value / 1e9 - float(rc['offset'])
+        if t < 0 or (end is not None and t > end + 60):
+            continue
+        num = str(int(r.get('driver_number') or 0))
+        code = rc['numbers'].get(num, num)
+        info = (payload.get('drivers') or {}).get(code) or {}
+        out.append(dict(id=f"{num}:{r.get('date')}", t=round(t, 3), num=num, code=code, color=info.get('color') or '',
+                        url=r.get('recording_url'), transcript=''))
+    out.sort(key=lambda e: e['t'])
+    return dict(events=out, reason='' if out else 'No team radio published for this session.')

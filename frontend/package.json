@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview --host 127.0.0.1"
+    "build": "tsc -b && vite build --outDir .build-stage --emptyOutDir && node scripts/publish.mjs dist",
+    "preview": "vite preview --host 127.0.0.1",
+    "build:test": "tsc -b && vite build --outDir .build-stage --emptyOutDir && node scripts/publish.mjs dist-test"
   },
   "dependencies": {
     "lucide-react": "^0.548.0",
